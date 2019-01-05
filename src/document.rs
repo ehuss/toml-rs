@@ -4,6 +4,7 @@
 
 use datetime;
 use de::{self, Deserializer, Line, RawKey, RawValue, RawValueType};
+use ser;
 use std::{
     borrow::Cow,
     collections::{hash_map, HashMap},
@@ -14,7 +15,6 @@ use std::{
 #[derive(Debug)]
 pub struct TomlDocument<'a> {
     has_bom: bool,
-    // id_counter: usize,
     // line_ending: LineEndingStyle,
     root: DocTable<'a>,
     /// List of bracketed tables in the order they appear.
@@ -30,22 +30,10 @@ impl<'a> PathIndex<'a> {
         PathIndex(Vec::new())
     }
 
-    // fn push(&mut self, key: IndexKey<'a>, id: TableId) {
-    //     self.0.push((key, id))
-    // }
     fn push(&mut self, key: IndexKey<'a>) {
         self.0.push(key)
     }
 }
-
-// #[derive(Debug)]
-// struct TableId(usize);
-
-// impl TableId {
-//     fn new(id: usize) -> TableId {
-//         TableId(id)
-//     }
-// }
 
 #[derive(Debug)]
 enum IndexKey<'a> {
@@ -212,8 +200,9 @@ impl<'a> TomlDocument<'a> {
     pub fn to_string(&self) -> String {
         let mut res: Vec<u8> = Vec::new();
         if self.has_bom {
-            res.push(b'\xfe');
-            res.push(b'\xff');
+            res.push(b'\xef');
+            res.push(b'\xbb');
+            res.push(b'\xbf');
         }
         let mut writer = Box::new(res);
         self.root.render(&mut writer);
@@ -716,8 +705,12 @@ impl<'a> DocValueType<'a> {
             }
             DocValueType::Boolean(b) => drop(write!(output, "{}", b)),
             DocValueType::String(s) => {
-                // TODO: Escaping
-                render_str(s, output);
+                // TODO: there is a mistmatch between the ser module using
+                // only strings and this module preferring `io::Write` trait.
+                // Perhaps ser could also be transitioned to use Write?
+                let mut tmp = String::new();
+                ser::emit_str(&mut tmp, s, false, Some(&ser::StringSettings::pretty()));
+                output.write_all(tmp.as_bytes());
             }
             DocValueType::Datetime(d) => drop(write!(output, "{}", d)),
             DocValueType::Array(arr) => {
@@ -738,139 +731,6 @@ impl<'a> DocValueType<'a> {
             false
         }
     }
-}
-
-// ***********************
-// TODO: Share with ser.rs
-//       Also, may need to honor newline style.
-// ***********************
-fn render_str<'a>(s: &Cow<'a, str>, mut output: &mut dyn Write) {
-    // TODO: Share with ser.rs
-    match do_pretty(&s) {
-        Repr::Literal(literal, ty) => {
-            // A pretty string
-            match ty {
-                Type::NewlineTripple => output.write_all(b"'''\n"),
-                Type::OnelineTripple => output.write_all(b"'''"),
-                Type::OnelineSingle => output.write_all(b"\'"),
-            };
-            output.write_all(literal.as_bytes());
-            match ty {
-                Type::OnelineSingle => output.write_all(b"\'"),
-                _ => output.write_all(b"'''"),
-            };
-        }
-        Repr::Std(ty) => {
-            match ty {
-                Type::NewlineTripple => output.write_all(b"\"\"\"\n"),
-                // note: OnelineTripple can happen if do_pretty wants to do
-                // '''it's one line'''
-                // but settings.string.literal == false
-                Type::OnelineSingle | Type::OnelineTripple => output.write_all(b"\""),
-            };
-            for ch in s.chars() {
-                match ch {
-                    '\u{8}' => output.write_all(b"\\b"),
-                    '\u{9}' => output.write_all(b"\\t"),
-                    '\u{a}' => match ty {
-                        Type::NewlineTripple => output.write_all(b"\n"),
-                        Type::OnelineSingle => output.write_all(b"\\n"),
-                        _ => unreachable!(),
-                    },
-                    '\u{c}' => output.write_all(b"\\f"),
-                    '\u{d}' => output.write_all(b"\\r"),
-                    '\u{22}' => output.write_all(b"\\\""),
-                    '\u{5c}' => output.write_all(b"\\\\"),
-                    c if c < '\u{1f}' => write!(output, "\\u{:04X}", ch as u32),
-                    ch => write!(output, "{}", ch),
-                };
-            }
-            match ty {
-                Type::NewlineTripple => output.write_all(b"\"\"\""),
-                Type::OnelineSingle | Type::OnelineTripple => output.write_all(b"\""),
-            };
-        }
-    }
-    return;
-}
-
-#[derive(PartialEq)]
-enum Type {
-    NewlineTripple,
-    OnelineTripple,
-    OnelineSingle,
-}
-
-enum Repr {
-    /// represent as a literal string (using '')
-    Literal(String, Type),
-    /// represent the std way (using "")
-    Std(Type),
-}
-
-fn do_pretty(value: &str) -> Repr {
-    // For doing pretty prints we store in a new String
-    // because there are too many cases where pretty cannot
-    // work. We need to determine:
-    // - if we are a "multi-line" pretty (if there are \n)
-    // - if ['''] appears if multi or ['] if single
-    // - if there are any invalid control characters
-    //
-    // Doing it any other way would require multiple passes
-    // to determine if a pretty string works or not.
-    let mut out = String::with_capacity(value.len() * 2);
-    let mut ty = Type::OnelineSingle;
-    // found consecutive single quotes
-    let mut max_found_singles = 0;
-    let mut found_singles = 0;
-    let mut can_be_pretty = true;
-
-    for ch in value.chars() {
-        if can_be_pretty {
-            if ch == '\'' {
-                found_singles += 1;
-                if found_singles >= 3 {
-                    can_be_pretty = false;
-                }
-            } else {
-                if found_singles > max_found_singles {
-                    max_found_singles = found_singles;
-                }
-                found_singles = 0
-            }
-            match ch {
-                '\t' => {}
-                '\n' => ty = Type::NewlineTripple,
-                // note that the following are invalid: \b \f \r
-                c if c < '\u{1f}' => can_be_pretty = false, // Invalid control character
-                _ => {}
-            }
-            out.push(ch);
-        } else {
-            // the string cannot be represented as pretty,
-            // still check if it should be multiline
-            if ch == '\n' {
-                ty = Type::NewlineTripple;
-            }
-        }
-    }
-    if can_be_pretty && found_singles > 0 && value.ends_with('\'') {
-        // We cannot escape the ending quote so we must use """
-        can_be_pretty = false;
-    }
-    if !can_be_pretty {
-        debug_assert!(ty != Type::OnelineTripple);
-        return Repr::Std(ty);
-    }
-    if found_singles > max_found_singles {
-        max_found_singles = found_singles;
-    }
-    debug_assert!(max_found_singles < 3);
-    if ty == Type::OnelineSingle && max_found_singles >= 1 {
-        // no newlines, but must use ''' because it has ' in it
-        ty = Type::OnelineTripple;
-    }
-    Repr::Literal(out, ty)
 }
 
 fn is_blank(s: &str) -> bool {

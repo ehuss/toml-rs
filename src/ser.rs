@@ -173,13 +173,13 @@ impl ArraySettings {
 #[doc(hidden)]
 #[derive(Debug, Default, Clone)]
 /// String settings
-struct StringSettings {
+pub(crate) struct StringSettings {
     /// Whether to use literal strings when possible
     literal: bool,
 }
 
 impl StringSettings {
-    fn pretty() -> StringSettings {
+    pub(crate) fn pretty() -> StringSettings {
         StringSettings { literal: true }
     }
 }
@@ -523,7 +523,7 @@ impl<'a> Serializer<'a> {
         if ok {
             drop(write!(self.dst, "{}", key));
         } else {
-            self.emit_str(key, true)?;
+            drop(emit_str(&mut self.dst, key, true, self.settings.string.as_ref()));
         }
         Ok(())
     }
@@ -1871,4 +1871,144 @@ impl<E: ser::Error> ser::SerializeStruct for Categorize<E> {
     fn end(self) -> Result<Self::Ok, Self::Error> {
         Ok(Category::Table)
     }
+}
+
+pub(crate) fn emit_str(output: &mut String, value: &str, is_key: bool,
+    settings: Option<&StringSettings>) -> Result<(), Error>
+{
+    #[derive(PartialEq)]
+    enum Type {
+        NewlineTripple,
+        OnelineTripple,
+        OnelineSingle,
+    }
+
+    enum Repr {
+        /// represent as a literal string (using '')
+        Literal(String, Type),
+        /// represent the std way (using "")
+        Std(Type),
+    }
+
+    fn do_pretty(value: &str) -> Repr {
+        // For doing pretty prints we store in a new String
+        // because there are too many cases where pretty cannot
+        // work. We need to determine:
+        // - if we are a "multi-line" pretty (if there are \n)
+        // - if ['''] appears if multi or ['] if single
+        // - if there are any invalid control characters
+        //
+        // Doing it any other way would require multiple passes
+        // to determine if a pretty string works or not.
+        let mut out = String::with_capacity(value.len() * 2);
+        let mut ty = Type::OnelineSingle;
+        // found consecutive single quotes
+        let mut max_found_singles = 0;
+        let mut found_singles = 0;
+        let mut can_be_pretty = true;
+
+        for ch in value.chars() {
+            if can_be_pretty {
+                if ch == '\'' {
+                    found_singles += 1;
+                    if found_singles >= 3 {
+                        can_be_pretty = false;
+                    }
+                } else {
+                    if found_singles > max_found_singles {
+                        max_found_singles = found_singles;
+                    }
+                    found_singles = 0
+                }
+                match ch {
+                    '\t' => {}
+                    '\n' => ty = Type::NewlineTripple,
+                    // note that the following are invalid: \b \f \r
+                    c if c < '\u{1f}' => can_be_pretty = false, // Invalid control character
+                    _ => {}
+                }
+                out.push(ch);
+            } else {
+                // the string cannot be represented as pretty,
+                // still check if it should be multiline
+                if ch == '\n' {
+                    ty = Type::NewlineTripple;
+                }
+            }
+        }
+        if can_be_pretty && found_singles > 0 && value.ends_with('\'') {
+            // We cannot escape the ending quote so we must use """
+            can_be_pretty = false;
+        }
+        if !can_be_pretty {
+            debug_assert!(ty != Type::OnelineTripple);
+            return Repr::Std(ty);
+        }
+        if found_singles > max_found_singles {
+            max_found_singles = found_singles;
+        }
+        debug_assert!(max_found_singles < 3);
+        if ty == Type::OnelineSingle && max_found_singles >= 1 {
+            // no newlines, but must use ''' because it has ' in it
+            ty = Type::OnelineTripple;
+        }
+        Repr::Literal(out, ty)
+    }
+
+    let repr = if !is_key && settings.is_some() {
+        match (settings, do_pretty(value)) {
+            (Some(&StringSettings { literal: false, .. }), Repr::Literal(_, ty)) => {
+                Repr::Std(ty)
+            }
+            (_, r @ _) => r,
+        }
+    } else {
+        Repr::Std(Type::OnelineSingle)
+    };
+    match repr {
+        Repr::Literal(literal, ty) => {
+            // A pretty string
+            match ty {
+                Type::NewlineTripple => output.push_str("'''\n"),
+                Type::OnelineTripple => output.push_str("'''"),
+                Type::OnelineSingle => output.push('\''),
+            }
+            output.push_str(&literal);
+            match ty {
+                Type::OnelineSingle => output.push('\''),
+                _ => output.push_str("'''"),
+            }
+        }
+        Repr::Std(ty) => {
+            match ty {
+                Type::NewlineTripple => output.push_str("\"\"\"\n"),
+                // note: OnelineTripple can happen if do_pretty wants to do
+                // '''it's one line'''
+                // but settings.string.literal == false
+                Type::OnelineSingle | Type::OnelineTripple => output.push('"'),
+            }
+            for ch in value.chars() {
+                match ch {
+                    '\u{8}' => output.push_str("\\b"),
+                    '\u{9}' => output.push_str("\\t"),
+                    '\u{a}' => match ty {
+                        Type::NewlineTripple => output.push('\n'),
+                        Type::OnelineSingle => output.push_str("\\n"),
+                        _ => unreachable!(),
+                    },
+                    '\u{c}' => output.push_str("\\f"),
+                    '\u{d}' => output.push_str("\\r"),
+                    '\u{22}' => output.push_str("\\\""),
+                    '\u{5c}' => output.push_str("\\\\"),
+                    c if c < '\u{1f}' => drop(write!(output, "\\u{:04X}", ch as u32)),
+                    ch => output.push(ch),
+                }
+            }
+            match ty {
+                Type::NewlineTripple => output.push_str("\"\"\""),
+                Type::OnelineSingle | Type::OnelineTripple => output.push('"'),
+            }
+        }
+    }
+    Ok(())
 }
