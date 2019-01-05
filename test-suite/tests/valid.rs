@@ -2,7 +2,7 @@ extern crate toml;
 extern crate serde;
 extern crate serde_json;
 
-use toml::{Value as Toml, to_string_pretty};
+use toml::{Value as Toml, to_string_pretty, document};
 use serde::ser::Serialize;
 use serde_json::Value as Json;
 
@@ -101,6 +101,11 @@ fn run(toml_raw: &str, json_raw: &str) {
     let toml2 = toml.to_string().parse().unwrap();
     assert_eq!(toml, toml2);
     run_pretty(toml);
+
+    // Check the document api.
+    let doc = document::TomlDocument::from_str(toml_raw).unwrap();
+    let rendered = doc.to_string();
+    assert_eq!(toml_raw, rendered);
 }
 
 macro_rules! test( ($name:ident, $toml:expr, $json:expr) => (

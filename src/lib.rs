@@ -1,3 +1,6 @@
+    #![feature(test)]
+#![allow(deprecated)]  // TEMP
+#![allow(dead_code)]
 //! A [TOML]-parsing library
 //!
 //! This library implements a [TOML] v0.5.0 compatible parser,
@@ -176,3 +179,5 @@ pub mod macros;
 mod spanned;
 #[doc(no_inline)]
 pub use spanned::Spanned;
+
+pub mod document;

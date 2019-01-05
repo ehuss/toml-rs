@@ -24,5 +24,7 @@ fn bad() {
         ");
     bad("a = 1
          a.b = 2");
-    bad("a = {k1 = 1, k1.name = \"joe\"}")
+    bad("a = {k1 = 1, k1.name = \"joe\"}");
+    bad("a = {}
+         a.b = 1");
 }

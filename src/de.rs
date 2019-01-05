@@ -95,7 +95,7 @@ struct ErrorInner {
 
 /// Errors that can occur when deserializing a type.
 #[derive(Debug, Clone)]
-enum ErrorKind {
+pub(crate) enum ErrorKind {
     /// EOF was reached when looking for a value
     UnexpectedEof,
 
@@ -127,6 +127,9 @@ enum ErrorKind {
     /// A newline was found in a table key.
     NewlineInTableKey,
 
+    /// A newline was found in an inline table.
+    NewlineInInlineTable,
+
     /// A number failed to parse
     NumberInvalid,
 
@@ -147,6 +150,9 @@ enum ErrorKind {
 
     /// A duplicate table definition was found.
     DuplicateTable(String),
+
+    /// A duplicate key was found.
+    DuplicateKey(String),
 
     /// A previously defined table was redefined as an array.
     RedefineAsArray,
@@ -234,30 +240,15 @@ impl<'de, 'b> de::Deserializer<'de> for &'b mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        let (value, name) = self.string_or_table()?;
-        match value.e {
-            E::String(val) => visitor.visit_enum(val.into_deserializer()),
-            E::InlineTable(values) => {
-                if values.len() != 1 {
-                    Err(Error::from_kind(ErrorKind::Wanted {
-                        expected: "exactly 1 element",
-                        found: if values.is_empty() {
-                            "zero elements"
-                        } else {
-                            "more than 1 element"
-                        },
-                    }))
-                } else {
-                    visitor.visit_enum(InlineTableDeserializer {
-                        values: values.into_iter(),
-                        next_value: None,
-                    })
-                }
+        let value = self.string_or_table()?;
+        match value.parsed {
+            RawValueType::String(val) => visitor.visit_enum(val.into_deserializer()),
+            RawValueType::InlineTable(values) | RawValueType::DottedTable(values) => {
+                visitor.visit_enum(InlineTableDeserializer {
+                    values: values.into_iter(),
+                    next_value: None,
+                })
             }
-            E::DottedTable(_) => visitor.visit_enum(DottedTableDeserializer {
-                name: name.expect("Expected table header to be passed."),
-                value: value,
-            }),
             e @ _ => Err(Error::from_kind(ErrorKind::Wanted {
                 expected: "string or table",
                 found: e.type_name(),
@@ -275,14 +266,14 @@ impl<'de, 'b> de::Deserializer<'de> for &'b mut Deserializer<'de> {
 struct Table<'a> {
     at: usize,
     header: Vec<Cow<'a, str>>,
-    values: Option<Vec<(Cow<'a, str>, Value<'a>)>>,
+    values: Option<Vec<(Cow<'a, str>, RawValue<'a>)>>,
     array: bool,
 }
 
 #[doc(hidden)]
 pub struct MapVisitor<'de: 'b, 'b> {
-    values: vec::IntoIter<(Cow<'de, str>, Value<'de>)>,
-    next_value: Option<(Cow<'de, str>, Value<'de>)>,
+    values: vec::IntoIter<(Cow<'de, str>, RawValue<'de>)>,
+    next_value: Option<(Cow<'de, str>, RawValue<'de>)>,
     depth: usize,
     cur: usize,
     cur_parent: usize,
@@ -532,13 +523,13 @@ impl<'de> de::Deserializer<'de> for StrDeserializer<'de> {
     }
 }
 
-struct ValueDeserializer<'a> {
-    value: Value<'a>,
+pub(crate) struct ValueDeserializer<'a> {
+    value: RawValue<'a>,
     validate_struct_keys: bool,
 }
 
 impl<'a> ValueDeserializer<'a> {
-    fn new(value: Value<'a>) -> ValueDeserializer<'a> {
+    fn new(value: RawValue<'a>) -> ValueDeserializer<'a> {
         ValueDeserializer {
             value: value,
             validate_struct_keys: false,
@@ -558,28 +549,29 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.value.e {
-            E::Integer(i) => visitor.visit_i64(i),
-            E::Boolean(b) => visitor.visit_bool(b),
-            E::Float(f) => visitor.visit_f64(f),
-            E::String(Cow::Borrowed(s)) => visitor.visit_borrowed_str(s),
-            E::String(Cow::Owned(s)) => visitor.visit_string(s),
-            E::Datetime(s) => visitor.visit_map(DatetimeDeserializer {
+        match self.value.parsed {
+            RawValueType::Integer(i) => visitor.visit_i64(i),
+            RawValueType::Boolean(b) => visitor.visit_bool(b),
+            RawValueType::Float(f) => visitor.visit_f64(f),
+            RawValueType::String(Cow::Borrowed(s)) => visitor.visit_borrowed_str(s),
+            RawValueType::String(Cow::Owned(s)) => visitor.visit_string(s),
+            RawValueType::Datetime(s) => visitor.visit_map(DatetimeDeserializer {
                 date: s,
                 visited: false,
             }),
-            E::Array(values) => {
+            RawValueType::Array(values) => {
                 let mut s = de::value::SeqDeserializer::new(values.into_iter());
                 let ret = visitor.visit_seq(&mut s)?;
                 s.end()?;
                 Ok(ret)
             }
-            E::InlineTable(values) | E::DottedTable(values) => {
+            RawValueType::InlineTable(values) | RawValueType::DottedTable(values) => {
                 visitor.visit_map(InlineTableDeserializer {
                     values: values.into_iter(),
                     next_value: None,
                 })
             }
+            RawValueType::RawTable(_) => panic!("raw table unexpected"),
         }
     }
 
@@ -593,7 +585,7 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
         V: de::Visitor<'de>,
     {
         if name == datetime::NAME && fields == &[datetime::FIELD] {
-            if let E::Datetime(s) = self.value.e {
+            if let RawValueType::Datetime(s) = self.value.parsed {
                 return visitor.visit_map(DatetimeDeserializer {
                     date: s,
                     visited: false,
@@ -602,8 +594,8 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
         }
 
         if self.validate_struct_keys {
-            match &self.value.e {
-                &E::InlineTable(ref values) | &E::DottedTable(ref values) => {
+            match &self.value.parsed {
+                &RawValueType::InlineTable(ref values) | &RawValueType::DottedTable(ref values) => {
                     let extra_fields = values
                         .iter()
                         .filter_map(|key_value| {
@@ -662,9 +654,9 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.value.e {
-            E::String(val) => visitor.visit_enum(val.into_deserializer()),
-            E::InlineTable(values) => {
+        match self.value.parsed {
+            RawValueType::String(val) => visitor.visit_enum(val.into_deserializer()),
+            RawValueType::InlineTable(values) | RawValueType::DottedTable(values) => {
                 if values.len() != 1 {
                     Err(Error::from_kind(ErrorKind::Wanted {
                         expected: "exactly 1 element",
@@ -706,7 +698,7 @@ impl<'de> de::Deserializer<'de> for ValueDeserializer<'de> {
     }
 }
 
-impl<'de> de::IntoDeserializer<'de, Error> for Value<'de> {
+impl<'de> de::IntoDeserializer<'de, Error> for RawValue<'de> {
     type Deserializer = ValueDeserializer<'de>;
 
     fn into_deserializer(self) -> Self::Deserializer {
@@ -717,7 +709,7 @@ impl<'de> de::IntoDeserializer<'de, Error> for Value<'de> {
 struct SpannedDeserializer<'a> {
     start: Option<usize>,
     end: Option<usize>,
-    value: Option<Value<'a>>,
+    value: Option<RawValue<'a>>,
 }
 
 impl<'de> de::MapAccess<'de> for SpannedDeserializer<'de> {
@@ -803,28 +795,9 @@ impl<'de> de::Deserializer<'de> for DatetimeFieldDeserializer {
     }
 }
 
-struct DottedTableDeserializer<'a> {
-    name: Cow<'a, str>,
-    value: Value<'a>,
-}
-
-impl<'de> de::EnumAccess<'de> for DottedTableDeserializer<'de> {
-    type Error = Error;
-    type Variant = TableEnumDeserializer<'de>;
-
-    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
-    where
-        V: de::DeserializeSeed<'de>,
-    {
-        let (name, value) = (self.name, self.value);
-        seed.deserialize(StrDeserializer::new(name))
-            .map(|val| (val, TableEnumDeserializer { value: value }))
-    }
-}
-
 struct InlineTableDeserializer<'a> {
-    values: vec::IntoIter<(Cow<'a, str>, Value<'a>)>,
-    next_value: Option<Value<'a>>,
+    values: vec::IntoIter<(Cow<'a, str>, RawValue<'a>)>,
+    next_value: Option<RawValue<'a>>,
 }
 
 impl<'de> de::MapAccess<'de> for InlineTableDeserializer<'de> {
@@ -876,15 +849,15 @@ impl<'de> de::EnumAccess<'de> for InlineTableDeserializer<'de> {
 
 /// Deserializes table values into enum variants.
 struct TableEnumDeserializer<'a> {
-    value: Value<'a>,
+    value: RawValue<'a>,
 }
 
 impl<'de> de::VariantAccess<'de> for TableEnumDeserializer<'de> {
     type Error = Error;
 
     fn unit_variant(self) -> Result<(), Self::Error> {
-        match self.value.e {
-            E::InlineTable(values) | E::DottedTable(values) => {
+        match self.value.parsed {
+            RawValueType::InlineTable(values) | RawValueType::DottedTable(values) => {
                 if values.len() == 0 {
                     Ok(())
                 } else {
@@ -909,8 +882,8 @@ impl<'de> de::VariantAccess<'de> for TableEnumDeserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
-        match self.value.e {
-            E::InlineTable(values) | E::DottedTable(values) => {
+        match self.value.parsed {
+            RawValueType::InlineTable(values) | RawValueType::DottedTable(values) => {
                 let tuple_values = values
                     .into_iter()
                     .enumerate()
@@ -935,10 +908,9 @@ impl<'de> de::VariantAccess<'de> for TableEnumDeserializer<'de> {
 
                 if tuple_values.len() == len {
                     de::Deserializer::deserialize_seq(
-                        ValueDeserializer::new(Value {
-                            e: E::Array(tuple_values),
-                            start: self.value.start,
-                            end: self.value.end,
+                        ValueDeserializer::new(RawValue {
+                            parsed: RawValueType::Array(tuple_values),
+                            ..self.value
                         }),
                         visitor,
                     )
@@ -1010,6 +982,7 @@ impl<'a> Deserializer<'a> {
         self.allow_duplciate_after_longer_table = allow;
     }
 
+    /// Parse everything.
     fn tables(&mut self) -> Result<Vec<Table<'a>>, Error> {
         let mut tables = Vec::new();
         let mut cur_table = Table {
@@ -1021,34 +994,32 @@ impl<'a> Deserializer<'a> {
 
         while let Some(line) = self.line()? {
             match line {
-                Line::Table {
+                Line::Header {
                     at,
-                    mut header,
+                    key,
                     array,
+                    ..
                 } => {
                     if !cur_table.header.is_empty() || cur_table.values.is_some() {
                         tables.push(cur_table);
                     }
                     cur_table = Table {
                         at: at,
-                        header: Vec::new(),
+                        header: key.parts,
                         values: Some(Vec::new()),
                         array: array,
                     };
-                    loop {
-                        let part = header.next().map_err(|e| self.token_error(e));
-                        match part? {
-                            Some(part) => cur_table.header.push(part),
-                            None => break,
-                        }
-                    }
                 }
-                Line::KeyValue(key, value) => {
+                Line::KeyValue{key, mut value} => {
                     if cur_table.values.is_none() {
                         cur_table.values = Some(Vec::new());
                     }
-                    self.add_dotted_key(key, value, cur_table.values.as_mut().unwrap())?;
+                    self.flatten_inline_tables(&mut value)?;
+                    self.add_dotted_key(key.parts, value, cur_table.values.as_mut().unwrap())?;
                 }
+                Line::Whitespace(_) => {}
+                Line::Comment{..} => {}
+                Line::Bom => {}
             }
         }
         if !cur_table.header.is_empty() || cur_table.values.is_some() {
@@ -1057,106 +1028,147 @@ impl<'a> Deserializer<'a> {
         Ok(tables)
     }
 
-    fn line(&mut self) -> Result<Option<Line<'a>>, Error> {
-        loop {
-            self.eat_whitespace()?;
-            if self.eat_comment()? {
-                continue;
-            }
-            if self.eat(Token::Newline)? {
-                continue;
-            }
-            break;
-        }
-
+    pub(crate) fn line(&mut self) -> Result<Option<Line<'a>>, Error> {
+        let start = self.tokens.current();
+        let indent = self.eat_whitespace()?;
+        // TODO: Peek here seems a little inefficient.
+        // TODO: capture line-ending style
         match self.peek()? {
-            Some((_, Token::LeftBracket)) => self.table_header().map(Some),
-            Some(_) => self.key_value().map(Some),
+            Some((_, Token::Newline)) => {
+                self.next()?;  // Skip newline.
+                Ok(Some(Line::Whitespace(&self.tokens.input()[start..self.tokens.current()])))
+            }
+            Some((_, Token::Comment(_))) => {
+                self.next()?;  // Skip comment.
+                Ok(Some(Line::Comment(&self.tokens.input()[start..self.tokens.current()])))
+            }
+            Some((_, Token::LeftBracket)) => self.table_header(indent).map(Some),
+            Some((_, Token::Bom)) => {
+                self.next()?;  // Skip bom.
+                Ok(Some(Line::Bom))
+            }
+            Some(_) => self.key_value(indent).map(Some),
             None => Ok(None),
         }
     }
 
-    fn table_header(&mut self) -> Result<Line<'a>, Error> {
-        let start = self.tokens.current();
+    fn table_header(&mut self, indent: &'a str) -> Result<Line<'a>, Error> {
+        let header_start = self.tokens.current();
         self.expect(Token::LeftBracket)?;
         let array = self.eat(Token::LeftBracket)?;
-        let ret = Header::new(self.tokens.clone(), array, self.require_newline_after_table);
-        if self.require_newline_after_table {
-            self.tokens.skip_to_newline();
-        } else {
-            loop {
-                match self.next()? {
-                    Some((_, Token::RightBracket)) => {
-                        if array {
-                            self.eat(Token::RightBracket)?;
-                        }
-                        break;
-                    }
-                    Some((_, Token::Newline)) | None => break,
-                    _ => {}
-                }
-            }
-            self.eat_whitespace()?;
+        let raw_key = self.dotted_key(None)?;
+        self.expect(Token::RightBracket)?;
+        if array {
+            self.expect(Token::RightBracket)?;
         }
-        Ok(Line::Table {
-            at: start,
-            header: ret,
+        let post_start = self.tokens.current();
+        self.eat_whitespace()?;
+        if !self.eat_comment()? && self.require_newline_after_table {
+            self.expect_newline_or_eof()?;
+        }
+        let posttext = &self.tokens.input()[post_start..self.tokens.current()];
+        Ok(Line::Header {
+            indent: indent,
+            at: header_start,
             array: array,
+            key: raw_key,
+            header_posttext: posttext,
         })
     }
 
-    fn key_value(&mut self) -> Result<Line<'a>, Error> {
-        let key = self.dotted_key()?;
-        self.eat_whitespace()?;
+    fn key_value(&mut self, indent: &'a str) -> Result<Line<'a>, Error> {
+        // key [ws] `=` [ws] val [ws] [comment] newline-or-eof
+        let raw_key = self.dotted_key(Some(indent))?;
         self.expect(Token::Equals)?;
-        self.eat_whitespace()?;
-
         let value = self.value()?;
-        self.eat_whitespace()?;
-        if !self.eat_comment()? {
-            self.eat_newline_or_eof()?;
+        // Require newline or eof.
+        if !value.has_trailing_newline() && !self.tokens.is_eof() {
+            match self.peek()? {
+                Some((Span{start, ..}, token)) => {
+                    return Err(self.error(start, ErrorKind::Wanted {
+                        expected: "newline",
+                        found: token.describe()
+                    }));
+                }
+                None => {}
+            }
         }
-
-        Ok(Line::KeyValue(key, value))
+        Ok(Line::KeyValue{key: raw_key, value: value})
     }
 
-    fn value(&mut self) -> Result<Value<'a>, Error> {
-        let at = self.tokens.current();
+    fn value(&mut self) -> Result<RawValue<'a>, Error> {
+        let pretext = self.eat_whitespace()?;
+        let start = self.tokens.current();
+        // TODO: avoid repetition here
         let value = match self.next()? {
-            Some((Span { start, end }, Token::String { val, .. })) => Value {
-                e: E::String(val),
-                start: start,
-                end: end,
-            },
-            Some((Span { start, end }, Token::Keylike("true"))) => Value {
-                e: E::Boolean(true),
-                start: start,
-                end: end,
-            },
-            Some((Span { start, end }, Token::Keylike("false"))) => Value {
-                e: E::Boolean(false),
-                start: start,
-                end: end,
-            },
-            Some((span, Token::Keylike(key))) => self.number_or_date(span, key)?,
-            Some((span, Token::Plus)) => self.number_leading_plus(span)?,
-            Some((Span { start, .. }, Token::LeftBrace)) => {
-                self.inline_table().map(|(Span { end, .. }, table)| Value {
-                    e: E::InlineTable(table),
+            Some((Span { start, end }, Token::String { val, .. })) => {
+                let text = &self.tokens.input()[start..end];
+                let posttext = self.eat_posttext()?;
+                RawValue {
+                    pretext: pretext,
                     start: start,
                     end: end,
-                })?
+                    text: text,
+                    posttext: posttext,
+                    parsed: RawValueType::String(val)
+                }
+            }
+            Some((Span { start, end }, Token::Keylike("true"))) => {
+                let text = &self.tokens.input()[start..end];
+                let posttext = self.eat_posttext()?;
+                RawValue {
+                    pretext: pretext,
+                    start: start,
+                    end: end,
+                    text: text,
+                    posttext: posttext,
+                    parsed: RawValueType::Boolean(true)
+                }
+            }
+            Some((Span { start, end }, Token::Keylike("false"))) => {
+                let text = &self.tokens.input()[start..end];
+                let posttext = self.eat_posttext()?;
+                RawValue {
+                    pretext: pretext,
+                    start: start,
+                    end: end,
+                    text: text,
+                    posttext: posttext,
+                    parsed: RawValueType::Boolean(false)
+                }
+            }
+            Some((span, Token::Keylike(key))) => self.number_or_date(pretext, span, key)?,
+            Some((_span, Token::Plus)) => self.number_leading_plus(pretext, start)?,
+            Some((Span { start, .. }, Token::LeftBrace)) => {
+                let table = self.inline_table()?;
+                let end = self.tokens.current();
+                let text = &self.tokens.input()[start..end];
+                let posttext = self.eat_posttext()?;
+                RawValue {
+                    pretext: pretext,
+                    start: start,
+                    end: end,
+                    text: text,
+                    posttext: posttext,
+                    parsed: RawValueType::RawTable(table),
+                }
             }
             Some((Span { start, .. }, Token::LeftBracket)) => {
-                self.array().map(|(Span { end, .. }, array)| Value {
-                    e: E::Array(array),
+                let (span, array) = self.array()?;
+                let text = &self.tokens.input()[start..span.end];
+                let posttext = self.eat_posttext()?;
+                RawValue {
+                    pretext: pretext,
                     start: start,
-                    end: end,
-                })?
+                    end: span.end,
+                    text: text,
+                    posttext: posttext,
+                    parsed: RawValueType::Array(array),
+                }
             }
             Some(token) => {
                 return Err(self.error(
-                    at,
+                    start,
                     ErrorKind::Wanted {
                         expected: "a value",
                         found: token.1.describe(),
@@ -1168,23 +1180,31 @@ impl<'a> Deserializer<'a> {
         Ok(value)
     }
 
-    fn number_or_date(&mut self, span: Span, s: &'a str) -> Result<Value<'a>, Error> {
+    fn number_or_date(&mut self, pretext: &'a str, span: Span, s: &'a str) -> Result<RawValue<'a>, Error> {
+        // TODO: change to closure, passing in self?
+        macro_rules! to_datetime {
+            ($span:expr, $value:expr) => {
+                // TODO: consider making this a method to avoid duplication in number()
+                let text = &self.tokens.input()[$span.start..$span.end]; // TODO ..=?
+                let posttext = self.eat_posttext()?;
+                return Ok(RawValue {
+                    pretext: pretext,
+                    start: $span.start,
+                    end: $span.end,
+                    text: text,
+                    posttext: posttext,
+                    parsed: RawValueType::Datetime($value),
+                })
+            }
+        }
         if s.contains('T') || (s.len() > 1 && s[1..].contains('-')) && !s.contains("e-") {
-            self.datetime(span, s, false)
-                .map(|(Span { start, end }, d)| Value {
-                    e: E::Datetime(d),
-                    start: start,
-                    end: end,
-                })
+            let (span, s) = self.datetime(span, s, false)?;
+            to_datetime!(span, s);
         } else if self.eat(Token::Colon)? {
-            self.datetime(span, s, true)
-                .map(|(Span { start, end }, d)| Value {
-                    e: E::Datetime(d),
-                    start: start,
-                    end: end,
-                })
+            let (span, s) = self.datetime(span, s, true)?;
+            to_datetime!(span, s);
         } else {
-            self.number(span, s)
+            self.number(pretext, span, s)
         }
     }
 
@@ -1192,7 +1212,7 @@ impl<'a> Deserializer<'a> {
     ///
     /// Used to deserialize enums. Unit enums may be represented as a string or a table, all other
     /// structures (tuple, newtype, struct) must be represented as a table.
-    fn string_or_table(&mut self) -> Result<(Value<'a>, Option<Cow<'a, str>>), Error> {
+    fn string_or_table(&mut self) -> Result<RawValue<'a>, Error> {
         match self.peek()? {
             Some((_, Token::LeftBracket)) => {
                 let tables = self.tables()?;
@@ -1216,97 +1236,90 @@ impl<'a> Deserializer<'a> {
                     .last()
                     .expect("Expected at least one header value for table.");
 
-                let start = table.at;
                 let end = table
                     .values
                     .as_ref()
                     .and_then(|values| values.last())
                     .map(|&(_, ref val)| val.end)
                     .unwrap_or_else(|| header.len());
-                Ok((
-                    Value {
-                        e: E::DottedTable(table.values.unwrap_or_else(Vec::new)),
-                        start: start,
-                        end: end,
-                    },
-                    Some(header.clone()),
-                ))
+                let raw_value = RawValue {
+                    pretext: "", // TODO
+                    text: "",  // TODO
+                    posttext: "",  // TODO
+                    start: table.at,
+                    end: end,
+                    parsed: RawValueType::InlineTable(table.values.unwrap_or_else(Vec::new)),
+                };
+                let values = vec![(header.clone(), raw_value)];
+                let raw_value_table = RawValue {
+                    pretext: "", // TODO
+                    text: "",  // TODO
+                    posttext: "",  // TODO
+                    start: table.at,
+                    end: end,
+                    parsed: RawValueType::InlineTable(values),
+                };
+                Ok(raw_value_table)
             }
-            Some(_) => self.value().map(|val| (val, None)),
+            Some(_) => {
+                let mut value = self.value()?;
+                if let RawValueType::RawTable(_) = value.parsed {
+                    self.flatten_inline_tables(&mut value)?;
+                }
+                Ok(value)
+            }
             None => Err(self.eof()),
         }
     }
 
-    fn number(&mut self, Span { start, end }: Span, s: &'a str) -> Result<Value<'a>, Error> {
-        let to_integer = |f| Value {
-            e: E::Integer(f),
-            start: start,
-            end: end,
-        };
-        if s.starts_with("0x") {
-            self.integer(&s[2..], 16).map(to_integer)
+    fn number(&mut self, pretext: &'a str, span: Span, s: &'a str) -> Result<RawValue<'a>, Error> {
+        let parsed = if s.starts_with("0x") {
+            RawValueType::Integer(self.integer(&s[2..], 16)?)
         } else if s.starts_with("0o") {
-            self.integer(&s[2..], 8).map(to_integer)
+            RawValueType::Integer(self.integer(&s[2..], 8)?)
         } else if s.starts_with("0b") {
-            self.integer(&s[2..], 2).map(to_integer)
+            RawValueType::Integer(self.integer(&s[2..], 2)?)
         } else if s.contains('e') || s.contains('E') {
-            self.float(s, None).map(|f| Value {
-                e: E::Float(f),
-                start: start,
-                end: end,
-            })
+            RawValueType::Float(self.float(s, None)?)
         } else if self.eat(Token::Period)? {
             let at = self.tokens.current();
             match self.next()? {
-                Some((Span { start, end }, Token::Keylike(after))) => {
-                    self.float(s, Some(after)).map(|f| Value {
-                        e: E::Float(f),
-                        start: start,
-                        end: end,
-                    })
+                Some((_, Token::Keylike(after))) => {
+                    RawValueType::Float(self.float(s, Some(after))?)
                 }
-                _ => Err(self.error(at, ErrorKind::NumberInvalid)),
+                _ => return Err(self.error(at, ErrorKind::NumberInvalid)),
             }
         } else if s == "inf" {
-            Ok(Value {
-                e: E::Float(f64::INFINITY),
-                start: start,
-                end: end,
-            })
+            RawValueType::Float(f64::INFINITY)
         } else if s == "-inf" {
-            Ok(Value {
-                e: E::Float(f64::NEG_INFINITY),
-                start: start,
-                end: end,
-            })
+            RawValueType::Float(f64::NEG_INFINITY)
         } else if s == "nan" {
-            Ok(Value {
-                e: E::Float(f64::NAN),
-                start: start,
-                end: end,
-            })
+            RawValueType::Float(f64::NAN)
         } else if s == "-nan" {
-            Ok(Value {
-                e: E::Float(-f64::NAN),
-                start: start,
-                end: end,
-            })
+            RawValueType::Float(-f64::NAN)
         } else {
-            self.integer(s, 10).map(to_integer)
-        }
+            RawValueType::Integer(self.integer(s, 10)?)
+        };
+        let text = &self.tokens.input()[span.start..self.tokens.current()]; // TODO ..=?
+        let posttext = self.eat_posttext()?;
+        Ok(RawValue {
+            pretext: pretext,
+            start: span.start,
+            end: span.end,
+            text: text,
+            posttext: posttext,
+            parsed: parsed,
+        })
     }
 
-    fn number_leading_plus(&mut self, Span { start, .. }: Span) -> Result<Value<'a>, Error> {
-        let start_token = self.tokens.current();
+    fn number_leading_plus(&mut self, pretext: &'a str, start: usize) -> Result<RawValue<'a>, Error> {
         match self.next()? {
             Some((Span { end, .. }, Token::Keylike(s))) => self.number(
-                Span {
-                    start: start,
-                    end: end,
-                },
-                s,
+                pretext,
+                Span{start: start, end: end},
+                s
             ),
-            _ => Err(self.error(start_token, ErrorKind::NumberInvalid)),
+            _ => Err(self.error(start, ErrorKind::NumberInvalid)),
         }
     }
 
@@ -1487,32 +1500,30 @@ impl<'a> Deserializer<'a> {
 
     // TODO(#140): shouldn't buffer up this entire table in memory, it'd be
     // great to defer parsing everything until later.
-    fn inline_table(&mut self) -> Result<(Span, Vec<(Cow<'a, str>, Value<'a>)>), Error> {
+    fn inline_table(&mut self) -> Result<Vec<(RawKey<'a>, RawValue<'a>)>, Error> {
         let mut ret = Vec::new();
         self.eat_whitespace()?;
-        if let Some(span) = self.eat_spanned(Token::RightBrace)? {
-            return Ok((span, ret));
+        if self.eat(Token::RightBrace)? {
+            return Ok(ret);
         }
         loop {
-            let key = self.dotted_key()?;
-            self.eat_whitespace()?;
+            let raw_key = self.dotted_key(None)?;
             self.expect(Token::Equals)?;
-            self.eat_whitespace()?;
-            let value = self.value()?;
-            self.add_dotted_key(key, value, &mut ret)?;
-
-            self.eat_whitespace()?;
-            if let Some(span) = self.eat_spanned(Token::RightBrace)? {
-                return Ok((span, ret));
+            let raw_value = self.value()?;
+            if raw_value.has_trailing_newline() {
+                return Err(self.error(self.tokens.current()-1, ErrorKind::NewlineInInlineTable));
+            }
+            ret.push((raw_key, raw_value));
+            if self.eat(Token::RightBrace)? {
+                return Ok(ret);
             }
             self.expect(Token::Comma)?;
-            self.eat_whitespace()?;
         }
     }
 
     // TODO(#140): shouldn't buffer up this entire array in memory, it'd be
     // great to defer parsing everything until later.
-    fn array(&mut self) -> Result<(Span, Vec<Value<'a>>), Error> {
+    fn array(&mut self) -> Result<(Span, Vec<RawValue<'a>>), Error> {
         let mut ret = Vec::new();
 
         let intermediate = |me: &mut Deserializer| {
@@ -1555,19 +1566,33 @@ impl<'a> Deserializer<'a> {
             .map_err(|e| self.token_error(e))
     }
 
-    fn dotted_key(&mut self) -> Result<Vec<Cow<'a, str>>, Error> {
-        let mut result = Vec::new();
-        result.push(self.table_key()?);
-        self.eat_whitespace()?;
+    fn dotted_key(&mut self, indent: Option<&'a str>) -> Result<RawKey<'a>, Error> {
+        let mut parts = Vec::new();
+        let pretext = if let Some(indent) = indent {
+            indent
+        } else {
+            self.eat_whitespace()?
+        };
+        let start = self.tokens.current();
+        parts.push(self.table_key()?);
+        let mut end = self.tokens.current();
+        let mut posttext = self.eat_whitespace()?;
         while self.eat(Token::Period)? {
             self.eat_whitespace()?;
-            result.push(self.table_key()?);
-            self.eat_whitespace()?;
+            parts.push(self.table_key()?);
+            end = self.tokens.current();
+            posttext = self.eat_whitespace()?;
         }
-        Ok(result)
+        let text = &self.tokens.input()[start..end];
+        Ok(RawKey {
+            pretext: pretext,
+            text: text,
+            parts: parts,
+            posttext: posttext,
+        })
     }
 
-    /// Stores a value in the appropriate hierachical structure positioned based on the dotted key.
+    /// Stores a value in the appropriate hierarchical structure positioned based on the dotted key.
     ///
     /// Given the following definition: `multi.part.key = "value"`, `multi` and `part` are
     /// intermediate parts which are mapped to the relevant fields in the deserialized type's data
@@ -1576,14 +1601,14 @@ impl<'a> Deserializer<'a> {
     /// # Parameters
     ///
     /// * `key_parts`: Each segment of the dotted key, e.g. `part.one` maps to
-    ///                `vec![Cow::Borrowed("part"), Cow::Borrowed("one")].`
+    ///                `vec![Cow::Borrowed("part"), Cow::Borrowed("one")].` FIXME
     /// * `value`: The parsed value.
     /// * `values`: The `Vec` to store the value in.
     fn add_dotted_key(
         &self,
         mut key_parts: Vec<Cow<'a, str>>,
-        value: Value<'a>,
-        values: &mut Vec<(Cow<'a, str>, Value<'a>)>,
+        value: RawValue<'a>,
+        values: &mut Vec<(Cow<'a, str>, RawValue<'a>)>,
     ) -> Result<(), Error> {
         let key = key_parts.remove(0);
         if key_parts.is_empty() {
@@ -1593,30 +1618,35 @@ impl<'a> Deserializer<'a> {
         match values.iter_mut().find(|&&mut (ref k, _)| *k == key) {
             Some(&mut (
                 _,
-                Value {
-                    e: E::DottedTable(ref mut v),
+                RawValue {
+                    parsed: RawValueType::DottedTable(ref mut v),
                     ..
                 },
             )) => {
                 return self.add_dotted_key(key_parts, value, v);
             }
-            Some(&mut (_, Value { start, .. })) => {
+            Some(&mut (_, RawValue { start, .. })) => {
                 return Err(self.error(start, ErrorKind::DottedKeyInvalidType));
             }
             None => {}
         }
         // The start/end value is somewhat misleading here.
-        let table_values = Value {
-            e: E::DottedTable(Vec::new()),
-            start: value.start,
-            end: value.end,
+        let table_values = RawValue {
+            // TODO
+            // pretext: &'a str,
+            // text: &'a str,
+            // posttext: &'a str,
+            // start: value.start,
+            // end: value.end,
+            parsed: RawValueType::DottedTable(Vec::new()),
+            ..value
         };
         values.push((key, table_values));
         let last_i = values.len() - 1;
         if let (
             _,
-            Value {
-                e: E::DottedTable(ref mut v),
+            RawValue {
+                parsed: RawValueType::DottedTable(ref mut v),
                 ..
             },
         ) = values[last_i]
@@ -1626,7 +1656,38 @@ impl<'a> Deserializer<'a> {
         Ok(())
     }
 
-    fn eat_whitespace(&mut self) -> Result<(), Error> {
+    fn flatten_inline_tables(&self, value: &mut RawValue<'a>) -> Result<(), Error> {
+        match value.parsed {
+            RawValueType::RawTable(_) => {
+                let items = Vec::new();
+                let new_parsed = RawValueType::InlineTable(items);
+                let old_parsed = std::mem::replace(&mut value.parsed, new_parsed);
+                if let RawValueType::RawTable(old_items) = old_parsed {
+                    if let RawValueType::InlineTable(new_items) = &mut value.parsed {
+                        for (old_key, mut old_value) in old_items {
+                            self.flatten_inline_tables(&mut old_value)?;
+                            self.add_dotted_key(old_key.parts, old_value, new_items)?;
+                        }
+                    }
+                }
+            }
+            RawValueType::InlineTable(ref mut items) | RawValueType::DottedTable(ref mut items) => {
+                // TODO: Is this necessary?
+                for (_, ref mut v) in items {
+                    self.flatten_inline_tables(v)?;
+                }
+            }
+            RawValueType::Array(ref mut items) => {
+                for mut item in items {
+                    self.flatten_inline_tables(&mut item)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn eat_whitespace(&mut self) -> Result<&'a str, Error> {
         self.tokens
             .eat_whitespace()
             .map_err(|e| self.token_error(e))
@@ -1636,10 +1697,23 @@ impl<'a> Deserializer<'a> {
         self.tokens.eat_comment().map_err(|e| self.token_error(e))
     }
 
-    fn eat_newline_or_eof(&mut self) -> Result<(), Error> {
+    fn eat_newline(&mut self) -> Result<bool, Error> {
+        self.tokens.eat_newline().map_err(|e| self.token_error(e))
+    }
+
+    fn expect_newline_or_eof(&mut self) -> Result<(), Error> {
         self.tokens
-            .eat_newline_or_eof()
+            .expect_newline_or_eof()
             .map_err(|e| self.token_error(e))
+    }
+
+    fn eat_posttext(&mut self) -> Result<&'a str, Error> {
+        let start = self.tokens.current();
+        self.eat_whitespace()?;
+        if !self.eat_comment()? {
+            self.eat_newline()?;
+        }
+        Ok(&self.tokens.input()[start..self.tokens.current()])
     }
 
     fn eat(&mut self, expected: Token<'a>) -> Result<bool, Error> {
@@ -1737,7 +1811,7 @@ impl Error {
         self.inner.line.map(|line| (line, self.inner.col))
     }
 
-    fn from_kind(kind: ErrorKind) -> Error {
+    pub(crate) fn from_kind(kind: ErrorKind) -> Error {
         Error {
             inner: Box::new(ErrorInner {
                 kind: kind,
@@ -1749,7 +1823,7 @@ impl Error {
         }
     }
 
-    fn custom(s: String) -> Error {
+    pub(crate) fn custom(s: String) -> Error {
         Error {
             inner: Box::new(ErrorInner {
                 kind: ErrorKind::Custom,
@@ -1797,6 +1871,7 @@ impl fmt::Display for Error {
             )?,
             ErrorKind::UnterminatedString => "unterminated string".fmt(f)?,
             ErrorKind::NewlineInTableKey => "found newline in table key".fmt(f)?,
+            ErrorKind::NewlineInInlineTable => "found newline in inline table".fmt(f)?,
             ErrorKind::Wanted { expected, found } => {
                 write!(f, "expected {}, found {}", expected, found)?
             }
@@ -1805,6 +1880,9 @@ impl fmt::Display for Error {
             ErrorKind::MixedArrayType => "mixed types in an array".fmt(f)?,
             ErrorKind::DuplicateTable(ref s) => {
                 write!(f, "redefinition of table `{}`", s)?;
+            }
+            ErrorKind::DuplicateKey(ref s) => {
+                write!(f, "duplicate key `{}`", s)?;
             }
             ErrorKind::RedefineAsArray => "table redefined as array".fmt(f)?,
             ErrorKind::EmptyTableKey => "empty table key found".fmt(f)?,
@@ -1861,11 +1939,13 @@ impl error::Error for Error {
             ErrorKind::Unexpected(_) => "unexpected or invalid character",
             ErrorKind::UnterminatedString => "unterminated string",
             ErrorKind::NewlineInTableKey => "found newline in table key",
+            ErrorKind::NewlineInInlineTable => "found newline in inline table",
             ErrorKind::Wanted { .. } => "expected a token but found another",
             ErrorKind::NumberInvalid => "invalid number",
             ErrorKind::DateInvalid => "invalid date",
             ErrorKind::MixedArrayType => "mixed types in an array",
             ErrorKind::DuplicateTable(_) => "duplicate table",
+            ErrorKind::DuplicateKey(_) => "duplicate key",
             ErrorKind::RedefineAsArray => "table redefined as array",
             ErrorKind::EmptyTableKey => "empty table key found",
             ErrorKind::MultilineStringKey => "invalid multiline string for key",
@@ -1886,103 +1966,114 @@ impl de::Error for Error {
     }
 }
 
-enum Line<'a> {
-    Table {
+pub(crate) enum Line<'a> {
+    Header {
+        /// Whitespace before opening bracket.
+        indent: &'a str,
+        /// Position where opening bracket starts.
         at: usize,
-        header: Header<'a>,
+        /// True if array table.
         array: bool,
+        /// Name information, including any whitespace inside the brackets.
+        key: RawKey<'a>,
+        /// Whitespace/comment following the closing bracket.
+        header_posttext: &'a str,
     },
-    KeyValue(Vec<Cow<'a, str>>, Value<'a>),
-}
-
-struct Header<'a> {
-    first: bool,
-    array: bool,
-    require_newline_after_table: bool,
-    tokens: Tokenizer<'a>,
-}
-
-impl<'a> Header<'a> {
-    fn new(tokens: Tokenizer<'a>, array: bool, require_newline_after_table: bool) -> Header<'a> {
-        Header {
-            first: true,
-            array: array,
-            tokens: tokens,
-            require_newline_after_table: require_newline_after_table,
-        }
-    }
-
-    fn next(&mut self) -> Result<Option<Cow<'a, str>>, TokenError> {
-        self.tokens.eat_whitespace()?;
-
-        if self.first || self.tokens.eat(Token::Period)? {
-            self.first = false;
-            self.tokens.eat_whitespace()?;
-            self.tokens.table_key().map(|t| t.1).map(Some)
-        } else {
-            self.tokens.expect(Token::RightBracket)?;
-            if self.array {
-                self.tokens.expect(Token::RightBracket)?;
-            }
-
-            self.tokens.eat_whitespace()?;
-            if self.require_newline_after_table {
-                if !self.tokens.eat_comment()? {
-                    self.tokens.eat_newline_or_eof()?;
-                }
-            }
-            Ok(None)
-        }
-    }
+    KeyValue {
+        key: RawKey<'a>,
+        value: RawValue<'a>,
+    },
+    Whitespace(&'a str),
+    Comment(&'a str),
+    /// Byte-order mark
+    Bom,
 }
 
 #[derive(Debug)]
-struct Value<'a> {
-    e: E<'a>,
-    start: usize,
-    end: usize,
+pub(crate) struct RawKey<'a> {
+    /// Whitespace in front of the key.
+    pub(crate) pretext: &'a str,
+    /// Original text of the key.
+    pub(crate) text: &'a str,
+    /// Parsed parts of the key, split on dots.
+    pub(crate) parts: Vec<Cow<'a, str>>,
+    /// Whitespace after the key.
+    pub(crate) posttext: &'a str,
 }
 
 #[derive(Debug)]
-enum E<'a> {
+pub(crate) struct RawValue<'a> {
+    /// Whitespace in front of the value.
+    pub(crate) pretext: &'a str,
+    /// Original text of the value.
+    pub(crate) text: &'a str,
+    /// Whitespace/comment following the value.
+    pub(crate) posttext: &'a str,
+    /// Offset where value starts.
+    pub(crate) start: usize,
+    /// Offset immediately after the value.
+    pub(crate) end: usize,
+    /// Parsed value.
+    pub(crate) parsed: RawValueType<'a>,
+}
+
+#[derive(Debug)]
+pub(crate) enum RawValueType<'a> {
     Integer(i64),
     Float(f64),
     Boolean(bool),
     String(Cow<'a, str>),
     Datetime(&'a str),
-    Array(Vec<Value<'a>>),
-    InlineTable(Vec<(Cow<'a, str>, Value<'a>)>),
-    DottedTable(Vec<(Cow<'a, str>, Value<'a>)>),
+    Array(Vec<RawValue<'a>>),
+    /// Inline table `{key = value, ...}`, containing dotted keys.
+    /// This is only exposed in `Deserializer::line`. Other interfaces such as
+    /// `Deserializer::tables` will convert these to `InlineTable` by
+    /// flattening them.
+    RawTable(Vec<(RawKey<'a>, RawValue<'a>)>),
+    /// Inline table, after dotted keys have been flattened out.
+    InlineTable(Vec<(Cow<'a, str>, RawValue<'a>)>),
+    /// Intermediate inline table created by a dotted key.
+    /// This is used so that the parser can reject inline tables being mixed
+    /// with dotted keys. If it is decided that restriction is not necessary,
+    /// then this can be removed.
+    DottedTable(Vec<(Cow<'a, str>, RawValue<'a>)>),
 }
 
-impl<'a> E<'a> {
+impl<'a> RawValueType<'a> {
     fn type_name(&self) -> &'static str {
         match *self {
-            E::String(..) => "string",
-            E::Integer(..) => "integer",
-            E::Float(..) => "float",
-            E::Boolean(..) => "boolean",
-            E::Datetime(..) => "datetime",
-            E::Array(..) => "array",
-            E::InlineTable(..) => "inline table",
-            E::DottedTable(..) => "dotted table",
+            RawValueType::String(..) => "string",
+            RawValueType::Integer(..) => "integer",
+            RawValueType::Float(..) => "float",
+            RawValueType::Boolean(..) => "boolean",
+            RawValueType::Datetime(..) => "datetime",
+            RawValueType::Array(..) => "array",
+            RawValueType::RawTable(..) => "raw table",
+            RawValueType::InlineTable(..) => "inline table",
+            RawValueType::DottedTable(..) => "dotted table",
         }
     }
 }
 
-impl<'a> Value<'a> {
-    fn same_type(&self, other: &Value<'a>) -> bool {
-        match (&self.e, &other.e) {
-            (&E::String(..), &E::String(..))
-            | (&E::Integer(..), &E::Integer(..))
-            | (&E::Float(..), &E::Float(..))
-            | (&E::Boolean(..), &E::Boolean(..))
-            | (&E::Datetime(..), &E::Datetime(..))
-            | (&E::Array(..), &E::Array(..))
-            | (&E::InlineTable(..), &E::InlineTable(..)) => true,
-            (&E::DottedTable(..), &E::DottedTable(..)) => true,
+impl<'a> RawValue<'a> {
+    fn same_type(&self, other: &RawValue<'a>) -> bool {
+        match (&self.parsed, &other.parsed) {
+            (&RawValueType::String(..), &RawValueType::String(..))
+            | (&RawValueType::Integer(..), &RawValueType::Integer(..))
+            | (&RawValueType::Float(..), &RawValueType::Float(..))
+            | (&RawValueType::Boolean(..), &RawValueType::Boolean(..))
+            | (&RawValueType::Datetime(..), &RawValueType::Datetime(..))
+            | (&RawValueType::Array(..), &RawValueType::Array(..))
+            | (&RawValueType::RawTable(..), &RawValueType::RawTable(..))
+            | (&RawValueType::InlineTable(..), &RawValueType::InlineTable(..))
+            | (&RawValueType::DottedTable(..), &RawValueType::DottedTable(..)) => true,
 
             _ => false,
         }
+    }
+
+    fn has_trailing_newline(&self) -> bool {
+        let bytes = self.posttext.as_bytes();
+        !bytes.is_empty() && bytes[bytes.len()-1] == b'\n'
     }
 }

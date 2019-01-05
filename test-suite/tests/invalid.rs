@@ -5,6 +5,10 @@ fn run(toml: &str) {
     if let Ok(e) = toml.parse::<toml::Value>() {
         panic!("parsed to: {:#?}", e);
     }
+
+    if let Ok(doc) = toml::document::TomlDocument::from_str(toml) {
+        panic!("document parse should have failed:\n{:#?}", doc);
+    }
 }
 
 macro_rules! test( ($name:ident, $toml:expr) => (
