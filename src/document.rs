@@ -8,7 +8,6 @@ use ser;
 use std::{
     borrow::Cow,
     collections::{hash_map, HashMap},
-    // fmt::Write,
     io::Write,
 };
 
@@ -87,7 +86,7 @@ pub enum DocValueType<'a> {
 #[derive(Debug)]
 pub struct DocTable<'a> {
     /// Whitespace/comments in front of the header.
-    header_pretext: Vec<&'a str>, // TODO: make option
+    header_pretext: Option<Vec<&'a str>>,
     /// The original text of the name (everything between the brackets,
     /// including whitespace).
     header_key: Option<DocKey<'a>>,
@@ -107,29 +106,14 @@ pub struct DocTable<'a> {
 }
 
 impl<'a> TomlDocument<'a> {
-    pub fn new() -> TomlDocument<'a> {
-        TomlDocument {
-            has_bom: false,
-            root: DocTable::new(Vec::new()),
-            table_order: Vec::new(),
-        }
-    }
-
     pub fn from_str(s: &'a str) -> Result<TomlDocument<'a>, de::Error> {
         let mut d = Deserializer::new(s);
         let mut tables = Vec::new();
-        let mut cur_table = DocTable {
-            header_pretext: Vec::new(),
-            header_key: Some(DocKey::new(Vec::new(), None)),
-            header_posttext: &"",
-            is_array: false,
-            is_inline: false,
-            is_intermediate: false,
-            table_posttext: None,
-            indentation: &"",
-            items: Vec::new(),
-            map: HashMap::new(),
-        };
+        let mut cur_table = DocTable::new();
+        // The root table's key is an empty list.
+        cur_table.header_key = Some(DocKey::new(Vec::new(), None));
+        // Comments/whitespace are accumulated in `pretext` until the next
+        // value is received.
         let mut pretext = Vec::new();
         let mut has_bom = false;
 
@@ -144,19 +128,16 @@ impl<'a> TomlDocument<'a> {
                 } => {
                     tables.push(cur_table);
                     pretext.push(indent);
-                    // TODO: split_off should be None if empty
-                    cur_table = DocTable {
-                        header_pretext: pretext.split_off(0),
-                        header_key: Some(DocKey::from_raw(None, key)),
-                        header_posttext: header_posttext,
-                        is_array: array,
-                        is_inline: false,
-                        is_intermediate: false,
-                        table_posttext: None,
-                        indentation: &"",
-                        items: Vec::new(),
-                        map: HashMap::new(),
+                    let header_pretext = if pretext.is_empty() {
+                        None
+                    } else {
+                        Some(pretext.split_off(0))
                     };
+                    cur_table = DocTable::new();
+                    cur_table.header_pretext = header_pretext;
+                    cur_table.header_key = Some(DocKey::from_raw(None, key));
+                    cur_table.header_posttext = header_posttext;
+                    cur_table.is_array = array;
                 }
                 Line::KeyValue { key, value } => {
                     let doc_key = DocKey::from_raw(Some(pretext.split_off(0)), key);
@@ -165,9 +146,11 @@ impl<'a> TomlDocument<'a> {
                 }
                 Line::Whitespace(s) => {
                     if cur_table.is_root() && cur_table.items.is_empty() && is_blank(s) {
+                        let mut root_pretext =
+                            cur_table.header_pretext.get_or_insert_with(Vec::new);
                         // Comment blocks at the top of the document belong to the root table.
-                        cur_table.header_pretext.append(&mut pretext);
-                        cur_table.header_pretext.push(s);
+                        root_pretext.append(&mut pretext);
+                        root_pretext.push(s);
                     } else {
                         pretext.push(s);
                     }
@@ -211,6 +194,7 @@ impl<'a> TomlDocument<'a> {
                 table.render(&mut writer);
             }
         }
+        // The rendering code always uses utf-8.
         unsafe { String::from_utf8_unchecked(*writer) }
     }
 
@@ -220,11 +204,10 @@ impl<'a> TomlDocument<'a> {
 }
 
 impl<'a> DocTable<'a> {
-    pub fn new(name_parts: Vec<Cow<'a, str>>) -> DocTable<'a> {
+    pub fn new() -> DocTable<'a> {
         DocTable {
-            // id: TableId::new(0),
-            header_pretext: Vec::new(),
-            header_key: Some(DocKey::new(name_parts, None)),
+            header_pretext: None,
+            header_key: None,
             header_posttext: &"",
             is_array: false,
             is_inline: false,
@@ -277,18 +260,9 @@ impl<'a> DocTable<'a> {
         let part = key.parts[cur_part].clone();
         match self.map.entry(part) {
             hash_map::Entry::Vacant(entry) => {
-                let im_table = DocTable {
-                    header_pretext: Vec::new(),
-                    header_key: None,
-                    header_posttext: "",
-                    is_array: false,
-                    is_inline: true,
-                    is_intermediate: true,
-                    table_posttext: None,
-                    indentation: "",
-                    items: Vec::new(),
-                    map: HashMap::new(),
-                };
+                let mut im_table = DocTable::new();
+                im_table.is_inline = true;
+                im_table.is_intermediate = true;
                 let part = entry.key().clone();
                 let doc_value = DocValue::new(DocValueType::Table(im_table));
                 let mut dv = entry.insert(doc_value);
@@ -338,18 +312,8 @@ impl<'a> DocTable<'a> {
             hash_map::Entry::Vacant(entry) => {
                 let part = entry.key().clone();
                 if is_im {
-                    let im_table = DocTable {
-                        header_pretext: Vec::new(),
-                        header_key: None,
-                        header_posttext: "",
-                        is_array: false,
-                        is_inline: false,
-                        is_intermediate: true,
-                        table_posttext: None,
-                        indentation: "",
-                        items: Vec::new(),
-                        map: HashMap::new(),
-                    };
+                    let mut im_table = DocTable::new();
+                    im_table.is_intermediate = true;
                     let doc_value = DocValue::new(DocValueType::Table(im_table));
                     let mut dv = entry.insert(doc_value);
                     pi.push(IndexKey::Table(part));
@@ -474,8 +438,10 @@ impl<'a> DocTable<'a> {
     }
 
     fn render(&self, mut output: &mut dyn Write) {
-        for s in &self.header_pretext {
-            output.write_all(s.as_bytes());
+        if let Some(pretext) = &self.header_pretext {
+            for s in pretext {
+                output.write_all(s.as_bytes());
+            }
         }
         if let Some(key) = &self.header_key {
             assert!(!self.is_intermediate);
@@ -658,18 +624,8 @@ impl<'a> DocValueType<'a> {
                     .collect::<Result<Vec<_>, de::Error>>()?,
             ),
             RawValueType::RawTable(entries) => {
-                let mut table = DocTable {
-                    header_pretext: Vec::new(),
-                    header_key: None,
-                    header_posttext: "",
-                    is_array: false,
-                    is_inline: true,
-                    is_intermediate: false,
-                    table_posttext: None,
-                    indentation: "",
-                    items: Vec::new(),
-                    map: HashMap::new(),
-                };
+                let mut table = DocTable::new();
+                table.is_inline = true;
                 for (key, value) in entries {
                     let doc_key = DocKey::from_raw(None, key);
                     let doc_value = DocValue::from_raw(value)?;
@@ -811,15 +767,6 @@ mod tests {
         println!("doc={:#?}", doc);
         let rendered = doc.to_string();
         assert_eq!(text, rendered);
-    }
-
-    #[test]
-    fn xxx() {
-        let text = std::fs::read_to_string("big.toml").unwrap();
-        let doc = TomlDocument::from_str(&text).unwrap();
-        let out = doc.to_string();
-        assert_eq!(out, text);
-
     }
 
     extern crate test;
