@@ -2,12 +2,13 @@
 #![allow(missing_docs)]
 //! TODO
 
-use datetime;
+use datetime::Datetime;
 use de::{self, Deserializer, Line, RawKey, RawValue, RawValueType};
 use ser;
 use std::{
     borrow::Cow,
     collections::{hash_map, HashMap},
+    ops,
     io::Write,
 };
 
@@ -73,16 +74,16 @@ pub enum DocValueType<'a> {
     Float(f64),
     Boolean(bool),
     String(Cow<'a, str>),
-    Datetime(datetime::Datetime),
+    Datetime(Datetime),
     Array(Vec<DocValue<'a>>),
     Table(DocTable<'a>),
 }
 
 /// TODO: docme
 /// This serves multiple purposes.
-/// - Bracketed tables `[foo.bar]`, which are stored in the root table.
+/// - Bracketed tables `[foo.bar]`.
 /// - Inline tables `inline = {key = "value"}`
-/// - Intermediate tables.  Tables created by dotted keys (both bracketed and inline).
+/// - Intermediate tables. Tables created by dotted keys (both bracketed and inline).
 #[derive(Debug)]
 pub struct DocTable<'a> {
     /// Whitespace/comments in front of the header.
@@ -200,6 +201,10 @@ impl<'a> TomlDocument<'a> {
 
     fn get_path(&self, path: &PathIndex<'a>) -> Option<&DocValue<'a>> {
         self.root.get_path(path, 0)
+    }
+
+    fn get(&self, key: &str) -> Option<&DocValue<'a>> {
+        self.root.get(key)
     }
 }
 
@@ -515,6 +520,10 @@ impl<'a> DocTable<'a> {
             }
         }
     }
+
+    pub fn get(&self, key: &str) -> Option<&DocValue<'a>> {
+        self.map.get(key)
+    }
 }
 
 impl<'a> DocKey<'a> {
@@ -605,6 +614,258 @@ impl<'a> DocValue<'a> {
         }
         output.write_all(self.posttext.as_bytes());
     }
+
+    pub fn is_integer(&self) -> bool {
+        self.as_integer().is_some()
+    }
+
+    pub fn is_float(&self) -> bool {
+        self.as_float().is_some()
+    }
+
+    pub fn is_bool(&self) -> bool {
+        self.as_bool().is_some()
+    }
+
+    pub fn is_string(&self) -> bool {
+        self.as_str().is_some()
+    }
+
+    pub fn is_datetime(&self) -> bool {
+        self.as_datetime().is_some()
+    }
+
+    pub fn is_array(&self) -> bool {
+        match &self.parsed {
+            DocValueType::Array(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_table(&self) -> bool {
+        match &self.parsed {
+            DocValueType::Table(t) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_std_table(&self) -> bool {
+        match &self.parsed {
+            DocValueType::Table(t) => !t.is_inline && !t.is_intermediate,
+            _ => false,
+        }
+    }
+
+    pub fn is_array_table(&self) -> bool {
+        match &self.parsed {
+            DocValueType::Table(t) => t.is_array,
+            _ => false,
+        }
+    }
+
+    pub fn is_inline_table(&self) -> bool {
+        match &self.parsed {
+            DocValueType::Table(t) => t.is_inline,
+            _ => false,
+        }
+    }
+
+    pub fn as_integer(&self) -> Option<i64> {
+        match self.parsed {
+            DocValueType::Integer(i) => Some(i),
+            _ => None,
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self.parsed {
+            DocValueType::Float(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self.parsed {
+            DocValueType::Boolean(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match &self.parsed {
+            DocValueType::String(s) => Some(&s),
+            _ => None,
+        }
+    }
+
+    pub fn as_datetime(&self) -> Option<&Datetime> {
+        match &self.parsed {
+            DocValueType::Datetime(dt) => Some(&dt),
+            _ => None,
+        }
+    }
+
+    // pub fn get<I: DocIndex>(&'a self, index: I) -> Option<&'a DocValue<'a>> {
+    //     index.index(self)
+    // }
+    // pub fn get<I: DocIndex>(&self, index: I) -> Option<&DocValue<'a>> {
+    //     index.index(self)
+    // }
+    // pub fn get(&self, index: &str) -> Option<&DocValue<'a>> {
+    //     match &self.parsed {
+    //         DocValueType::Table(t) => t.get(&index),
+    //         _ => None,
+    //     }
+    // }
+    // fn get(&self, key: &str) -> Option<&DocValue<'a>> {
+    //     self.map.get(key)
+    // }
+
+    fn get<I: DocIndex>(&'a self, index: I) -> Option<&'a DocValue<'a>> {
+        index.index(self)
+    }
+}
+
+pub trait DocIndex: Sealed {
+    #[doc(hidden)]
+    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>>;
+}
+
+#[doc(hidden)]
+pub trait Sealed {}
+impl Sealed for usize {}
+impl Sealed for str {}
+impl Sealed for String {}
+impl<'a, T: Sealed + ?Sized> Sealed for &'a T {}
+
+// TODO: I cannot get the lifetimes to work for ops::Index to use DocIndex.
+// Temporary workaround is to implement the 3 types manually below.
+// impl<'a, I> ops::Index<I> for DocValue<'a>
+//     where I: DocIndex
+// {
+//     type Output = DocValue<'a>;
+
+//     fn index(&self, index: I) -> &DocValue<'a> {
+//         index.index(self).unwrap()
+//         // self.get(index).expect("index not found")
+//     }
+// }
+
+impl<'a> ops::Index<&str> for DocValue<'a>
+{
+    type Output = DocValue<'a>;
+
+    fn index(&self, index: &str) -> &DocValue<'a> {
+         match &self.parsed {
+            DocValueType::Table(t) => t.get(index).unwrap(),
+            _ => panic!("wrong type"),
+        }
+   }
+}
+
+impl<'a> ops::Index<String> for DocValue<'a>
+{
+    type Output = DocValue<'a>;
+
+    fn index(&self, index: String) -> &DocValue<'a> {
+         match &self.parsed {
+            DocValueType::Table(t) => t.get(&index).unwrap(),
+            _ => panic!("wrong type"),
+        }
+   }
+}
+
+impl<'a> ops::Index<usize> for DocValue<'a>
+{
+    type Output = DocValue<'a>;
+
+    fn index(&self, index: usize) -> &DocValue<'a> {
+         match &self.parsed {
+            DocValueType::Array(a) => a.get(index).unwrap(),
+            _ => panic!("wrong type"),
+        }
+   }
+}
+
+impl<'a> ops::Index<&str> for TomlDocument<'a>
+{
+    type Output = DocValue<'a>;
+
+    fn index(&self, index: &str) -> &DocValue<'a> {
+        self.get(index).expect("index not found")
+   }
+}
+
+        // match &self.parsed {
+        //     DocValueType::Table(t) => t.get(&index).unwrap(),
+        //     _ => panic!("wrong type"),
+        // }
+
+        // match &self.parsed {
+        //     DocValueType::Table(t) => t.map.get::<str>(&index).unwrap(),
+        //     _ => panic!("wrong type"),
+        // }
+
+
+        // self.get(index).expect("index not found")
+        // self.get(&index).expect("index not found")
+        // unimplemented!()
+//     }
+// }
+
+// impl DocIndex for usize {
+//     fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+//         match &val.parsed {
+//             DocValueType::Array(a) => a.get(*self),
+//             _ => None,
+//         }
+//     }
+
+//     // fn index_mut<'a>(&self, val: &'a mut DocValue) -> Option<&'a mut DocValue> {
+//     //     match *val {
+//     //         DocValue::Array(ref mut a) => a.get_mut(*self),
+//     //         _ => None,
+//     //     }
+//     // }
+// }
+
+impl DocIndex for str {
+    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+        match &val.parsed {
+            DocValueType::Table(t) => t.get(self),
+            _ => None,
+        }
+    }
+
+    // fn index_mut<'a>(&self, val: &'a mut DocValue) -> Option<&'a mut DocValue> {
+    //     match *val {
+    //         DocValue::Table(ref mut a) => a.get_mut(self),
+    //         _ => None,
+    //     }
+    // }
+}
+
+impl DocIndex for String {
+    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+        self[..].index(val)
+    }
+
+    // fn index_mut<'a>(&self, val: &'a mut DocValue) -> Option<&'a mut DocValue> {
+    //     self[..].index_mut(val)
+    // }
+}
+
+impl<'s, T: ?Sized> DocIndex for &'s T
+where
+    T: DocIndex,
+{
+    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+        (**self).index(val)
+    }
+
+//     // fn index_mut<'a>(&self, val: &'a mut DocValue) -> Option<&'a mut DocValue> {
+//     //     (**self).index_mut(val)
+//     // }
 }
 
 impl<'a> DocValueType<'a> {
