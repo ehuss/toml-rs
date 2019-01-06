@@ -37,6 +37,13 @@ impl PathIndex {
     fn push(&mut self, key: IndexKey) {
         self.0.push(key)
     }
+
+    fn starts_with(&self, part: &str) -> bool {
+        match &self.0[0] {
+            IndexKey::Table(s) => part == s,
+            IndexKey::Array(s, _) => part == s,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -156,9 +163,9 @@ impl TomlDocument {
                 }
                 Line::Whitespace(s) => {
                     if cur_table.is_root() && cur_table.items.is_empty() && is_blank(s) {
+                        // Comment blocks at the top of the document belong to the root table.
                         let mut root_pretext =
                             cur_table.header_pretext.get_or_insert_with(String::new);
-                        // Comment blocks at the top of the document belong to the root table.
                         root_pretext.push_str(&pretext);
                         pretext.clear();
                         root_pretext.push_str(s);
@@ -166,7 +173,9 @@ impl TomlDocument {
                         pretext.push_str(s);
                     }
                 }
-                Line::Comment(s) => pretext.push_str(s),
+                Line::Comment(s) => {
+                    pretext.push_str(s)
+                },
                 Line::Bom => has_bom = true,
             }
         }
@@ -229,6 +238,18 @@ impl TomlDocument {
         self.root.iter_mut()
     }
 
+    pub fn clear(&mut self) {
+        self.root.clear();
+        self.table_order.clear();
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<DocValue> {
+        let res = self.root.remove(key);
+        if res.is_some() {
+            self.table_order.retain(|pi| !pi.starts_with(key));
+        }
+        res
+    }
 }
 
 impl DocTable {
@@ -470,15 +491,22 @@ impl DocTable {
         // Could be useful if someone yanks out an intermediate table.
         if self.is_inline || self.is_intermediate {
             output.write_all(b"{");
+            let mut first = true;
             for (doc_key, pi) in &self.items {
                 if let Some(dv) = self.get_path(pi, 0) {
-                    output.write_all(b" ");
+                    if first {
+                        output.write_all(b" ");
+                    } else {
+                        first = false;
+                        output.write_all(b", ");
+                    }
                     // TODO: whitespace/comments here need to be fixed.
                     doc_key.render(output);
                     output.write_all(b" = ");
                     dv.render(output);
                 }
             }
+            // TODO: Newline?
             output.write_all(b"}");
         } else {
             if let Some(pretext) = &self.header_pretext {
@@ -567,10 +595,31 @@ impl DocTable {
         self.map.get_mut(key)
     }
 
+    // TODO: remove_entry
+
     pub fn remove(&mut self, key: &str) -> Option<DocValue> {
-        if let Some(dv) = self.map.remove(key) {
+        if let Some(mut dv) = self.map.remove(key) {
             // When detaching intermediate tables, convert them to something
             // useful that could potentially be re-used.
+            match &mut dv.parsed {
+                DocValueType::Table(t) => {
+                    if t.is_intermediate {
+                        t.is_intermediate = false;
+                        // TODO: inline intermediate tables?
+                        assert!(t.items.is_empty());
+                        t.items = t.map.keys().map(|k| {
+                            // TODO: Consider moving this to a method.
+                            let mut pi = PathIndex::new();
+                            pi.push(IndexKey::Table(k.to_string()));
+                            (DocKey::new(vec![k.to_string()], None), pi)
+                        }).collect();
+                    }
+                }
+                DocValueType::Array(a) => {
+                    // TODO
+                }
+                _ => {}
+            }
             Some(dv)
         } else {
             None

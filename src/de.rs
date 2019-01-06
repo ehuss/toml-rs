@@ -1040,6 +1040,7 @@ impl<'a> Deserializer<'a> {
             }
             Some((_, Token::Comment(_))) => {
                 self.next()?;  // Skip comment.
+                self.expect_newline_or_eof()?;
                 Ok(Some(Line::Comment(&self.tokens.input()[start..self.tokens.current()])))
             }
             Some((_, Token::LeftBracket)) => self.table_header(indent).map(Some),
