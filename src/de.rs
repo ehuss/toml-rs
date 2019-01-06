@@ -1096,7 +1096,7 @@ impl<'a> Deserializer<'a> {
         Ok(Line::KeyValue{key: raw_key, value: value})
     }
 
-    fn value(&mut self) -> Result<RawValue<'a>, Error> {
+    pub(crate) fn value(&mut self) -> Result<RawValue<'a>, Error> {
         let pretext = self.eat_whitespace()?;
         let start = self.tokens.current();
         // TODO: avoid repetition here

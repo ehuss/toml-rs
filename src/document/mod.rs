@@ -9,76 +9,77 @@ use std::{
     borrow::Cow,
     collections::{hash_map, HashMap},
     io::Write,
+    str::FromStr,
 };
 
 mod index;
 pub use self::index::DocIndex;
 
 #[derive(Debug)]
-pub struct TomlDocument<'a> {
+pub struct TomlDocument {
     has_bom: bool,
     // line_ending: LineEndingStyle,
-    root: DocTable<'a>,
+    root: DocTable,
     /// List of bracketed tables in the order they appear.
-    table_order: Vec<PathIndex<'a>>,
+    table_order: Vec<PathIndex>,
 }
 
 /// A chain of keys to a nested table.
 #[derive(Debug)]
-struct PathIndex<'a>(Vec<IndexKey<'a>>);
+struct PathIndex(Vec<IndexKey>);
 
-impl<'a> PathIndex<'a> {
-    fn new() -> PathIndex<'a> {
+impl PathIndex {
+    fn new() -> PathIndex {
         PathIndex(Vec::new())
     }
 
-    fn push(&mut self, key: IndexKey<'a>) {
+    fn push(&mut self, key: IndexKey) {
         self.0.push(key)
     }
 }
 
 #[derive(Debug)]
-enum IndexKey<'a> {
-    Table(Cow<'a, str>),
-    Array(Cow<'a, str>, usize),
+enum IndexKey {
+    Table(String),
+    Array(String, usize),
 }
 
 #[derive(Debug)]
-struct DocKey<'a> {
+struct DocKey {
     /// Whitespace/comments in front of the key.
-    pretext: Option<Vec<&'a str>>,
+    pretext: Option<String>,
     /// Whitespace in front of the key (same line).
-    indent: &'a str,
+    indent: Option<String>,
     /// Original text of the key.
     /// If None, the text will be generated from `parts`.
-    text: Option<&'a str>,
+    text: Option<String>,
     /// Parsed parts of the key, split on dots.
-    parts: Vec<Cow<'a, str>>,
+    parts: Vec<String>,
     /// Whitespace after the key.
-    posttext: &'a str,
+    posttext: Option<String>,
 }
 
 #[derive(Debug)]
-pub struct DocValue<'a> {
+pub struct DocValue {
     /// Whitespace in front of the value.
-    pretext: &'a str,
+    pretext: Option<String>,
     /// Original text of the value.
-    text: &'a str,
+    text: Option<String>,
     /// Whitespace/comment following the value.
-    posttext: &'a str,
+    posttext: Option<String>,
     /// Parsed value.
-    parsed: DocValueType<'a>,
+    parsed: DocValueType,
 }
 
 #[derive(Debug)]
-pub enum DocValueType<'a> {
+pub enum DocValueType {
     Integer(i64),
     Float(f64),
     Boolean(bool),
-    String(Cow<'a, str>),
+    String(String),
     Datetime(Datetime),
-    Array(Vec<DocValue<'a>>),
-    Table(DocTable<'a>),
+    Array(Vec<DocValue>),
+    Table(DocTable),
 }
 
 /// TODO: docme
@@ -87,29 +88,29 @@ pub enum DocValueType<'a> {
 /// - Inline tables `inline = {key = "value"}`
 /// - Intermediate tables. Tables created by dotted keys (both bracketed and inline).
 #[derive(Debug)]
-pub struct DocTable<'a> {
+pub struct DocTable {
     /// Whitespace/comments in front of the header.
-    header_pretext: Option<Vec<&'a str>>,
+    header_pretext: Option<String>,
     /// The original text of the name (everything between the brackets,
     /// including whitespace).
-    header_key: Option<DocKey<'a>>,
+    header_key: Option<DocKey>,
     /// All text following the closing bracket of the table name.
-    header_posttext: &'a str,
+    header_posttext: Option<String>,
     // TODO: Change to enum?
     is_array: bool,
     is_inline: bool,
     is_intermediate: bool,
     /// Comments/whitespace at the end of the file.
-    table_posttext: Option<Vec<&'a str>>,
-    indentation: &'a str,
+    table_posttext: Option<String>,
+    indentation: Option<String>,
     /// Sequence of key/values in the table in the order they appear.
-    items: Vec<(DocKey<'a>, PathIndex<'a>)>,
+    items: Vec<(DocKey, PathIndex)>,
     /// Map of values in this table.
-    map: HashMap<Cow<'a, str>, DocValue<'a>>,
+    map: HashMap<String, DocValue>,
 }
 
-impl<'a> TomlDocument<'a> {
-    pub fn from_str(s: &'a str) -> Result<TomlDocument<'a>, de::Error> {
+impl TomlDocument {
+    pub fn from_str(s: &str) -> Result<TomlDocument, de::Error> {
         let mut d = Deserializer::new(s);
         let mut tables = Vec::new();
         let mut cur_table = DocTable::new();
@@ -117,8 +118,16 @@ impl<'a> TomlDocument<'a> {
         cur_table.header_key = Some(DocKey::new(Vec::new(), None));
         // Comments/whitespace are accumulated in `pretext` until the next
         // value is received.
-        let mut pretext = Vec::new();
+        let mut pretext = String::new();
         let mut has_bom = false;
+
+        let opt_split_off = |s: &mut String| -> Option<String> {
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.split_off(0))
+            }
+        };
 
         while let Some(line) = d.line()? {
             match line {
@@ -130,35 +139,31 @@ impl<'a> TomlDocument<'a> {
                     header_posttext,
                 } => {
                     tables.push(cur_table);
-                    pretext.push(indent);
-                    let header_pretext = if pretext.is_empty() {
-                        None
-                    } else {
-                        Some(pretext.split_off(0))
-                    };
+                    pretext.push_str(indent);
                     cur_table = DocTable::new();
-                    cur_table.header_pretext = header_pretext;
+                    cur_table.header_pretext = opt_split_off(&mut pretext);
                     cur_table.header_key = Some(DocKey::from_raw(None, key));
-                    cur_table.header_posttext = header_posttext;
+                    cur_table.header_posttext = opt_str(header_posttext);
                     cur_table.is_array = array;
                 }
                 Line::KeyValue { key, value } => {
-                    let doc_key = DocKey::from_raw(Some(pretext.split_off(0)), key);
+                    let doc_key = DocKey::from_raw(opt_split_off(&mut pretext), key);
                     let doc_value = DocValue::from_raw(value)?;
                     cur_table.add_dotted_key(doc_key, doc_value)?;
                 }
                 Line::Whitespace(s) => {
                     if cur_table.is_root() && cur_table.items.is_empty() && is_blank(s) {
                         let mut root_pretext =
-                            cur_table.header_pretext.get_or_insert_with(Vec::new);
+                            cur_table.header_pretext.get_or_insert_with(String::new);
                         // Comment blocks at the top of the document belong to the root table.
-                        root_pretext.append(&mut pretext);
-                        root_pretext.push(s);
+                        root_pretext.push_str(&pretext);
+                        pretext.clear();
+                        root_pretext.push_str(s);
                     } else {
-                        pretext.push(s);
+                        pretext.push_str(s);
                     }
                 }
-                Line::Comment(s) => pretext.push(s),
+                Line::Comment(s) => pretext.push_str(s),
                 Line::Bom => has_bom = true,
             }
         }
@@ -201,26 +206,28 @@ impl<'a> TomlDocument<'a> {
         unsafe { String::from_utf8_unchecked(*writer) }
     }
 
-    fn get_path(&self, path: &PathIndex<'a>) -> Option<&DocValue<'a>> {
+    fn get_path(&self, path: &PathIndex) -> Option<&DocValue> {
         self.root.get_path(path, 0)
     }
 
-    fn get(&self, key: &str) -> Option<&DocValue<'a>> {
+    pub fn get(&self, key: &str) -> Option<&DocValue> {
         self.root.get(key)
     }
+
+
 }
 
-impl<'a> DocTable<'a> {
-    pub fn new() -> DocTable<'a> {
+impl DocTable {
+    pub fn new() -> DocTable {
         DocTable {
             header_pretext: None,
             header_key: None,
-            header_posttext: &"",
+            header_posttext: None,
             is_array: false,
             is_inline: false,
             is_intermediate: false,
             table_posttext: None,
-            indentation: &"",
+            indentation: None,
             items: Vec::new(),
             map: HashMap::new(),
         }
@@ -235,7 +242,7 @@ impl<'a> DocTable<'a> {
     }
 
     /// Add a key/value to this table.
-    fn add_dotted_key(&mut self, key: DocKey<'a>, value: DocValue<'a>) -> Result<(), de::Error> {
+    fn add_dotted_key(&mut self, key: DocKey, value: DocValue) -> Result<(), de::Error> {
         let mut pi = PathIndex::new();
         self.add_dotted_key_r(&key, value, 0, &mut pi)?;
         self.items.push((key, pi));
@@ -245,10 +252,10 @@ impl<'a> DocTable<'a> {
     // TODO: merge with add_table?
     fn add_dotted_key_r(
         &mut self,
-        key: &DocKey<'a>,
-        value: DocValue<'a>,
+        key: &DocKey,
+        value: DocValue,
         cur_part: usize,
-        pi: &mut PathIndex<'a>,
+        pi: &mut PathIndex,
     ) -> Result<(), de::Error> {
         let is_im = cur_part < key.parts.len() - 1;
         if !is_im {
@@ -308,9 +315,9 @@ impl<'a> DocTable<'a> {
     /// - `pi`: The path index to the table is accumulated in this value.
     fn add_table(
         &mut self,
-        mut table: DocTable<'a>,
+        mut table: DocTable,
         cur_part: usize,
-        pi: &mut PathIndex<'a>,
+        pi: &mut PathIndex,
     ) -> Result<(), de::Error> {
         let header_parts = table.header_key.as_ref().unwrap().parts.clone(); // TODO: clone?
         let part = header_parts[cur_part].clone();
@@ -446,9 +453,7 @@ impl<'a> DocTable<'a> {
 
     fn render(&self, mut output: &mut dyn Write) {
         if let Some(pretext) = &self.header_pretext {
-            for s in pretext {
-                output.write_all(s.as_bytes());
-            }
+            output.write_all(pretext.as_bytes());
         }
         if let Some(key) = &self.header_key {
             assert!(!self.is_intermediate);
@@ -468,7 +473,9 @@ impl<'a> DocTable<'a> {
                 }
             }
         }
-        output.write_all(self.header_posttext.as_bytes());
+        if let Some(posttext) = &self.header_posttext {
+            output.write_all(posttext.as_bytes());
+        }
         for (doc_key, pi) in &self.items {
             let dv = self.get_path(pi, 0).expect("missing item path");
             doc_key.render(output);
@@ -476,13 +483,11 @@ impl<'a> DocTable<'a> {
             dv.render(output);
         }
         if let Some(text) = &self.table_posttext {
-            for s in text {
-                output.write_all(s.as_bytes());
-            }
+            output.write_all(text.as_bytes());
         }
     }
 
-    fn get_path(&self, path: &PathIndex<'a>, path_idx: usize) -> Option<&DocValue<'a>> {
+    fn get_path(&self, path: &PathIndex, path_idx: usize) -> Option<&DocValue> {
         // TODO: Replace these .0 with with methods.
         match &path.0[path_idx] {
             IndexKey::Table(name) => {
@@ -523,51 +528,54 @@ impl<'a> DocTable<'a> {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<&DocValue<'a>> {
+    pub fn get(&self, key: &str) -> Option<&DocValue> {
         self.map.get(key)
     }
 }
 
-impl<'a> DocKey<'a> {
-    fn new(parts: Vec<Cow<'a, str>>, text: Option<&'a str>) -> DocKey<'a> {
+impl DocKey {
+    fn new(parts: Vec<String>, text: Option<String>) -> DocKey {
         DocKey {
             pretext: None,
-            indent: "",
+            indent: None,
             text: text,
             parts: parts,
-            posttext: "",
+            posttext: None,
         }
     }
 
-    fn from_raw(pretext: Option<Vec<&'a str>>, raw: RawKey<'a>) -> DocKey<'a> {
+    fn from_raw(pretext: Option<String>, raw: RawKey) -> DocKey {
         DocKey {
             pretext: pretext,
-            indent: raw.pretext,
-            text: Some(raw.text),
-            parts: raw.parts,
-            posttext: raw.posttext,
+            indent: opt_str(raw.pretext),
+            text: opt_str(raw.text),
+            parts: raw.parts.into_iter().map(|p| p.into_owned()).collect(),
+            posttext: opt_str(raw.posttext),
         }
     }
 
     fn render(&self, mut output: &mut dyn Write) {
         if let Some(pretext) = &self.pretext {
-            for s in pretext {
-                output.write_all(s.as_bytes());
-            }
+            output.write_all(pretext.as_bytes());
         }
-        output.write_all(self.indent.as_bytes());
-        if let Some(text) = self.text {
+        if let Some(indent) = &self.indent {
+            output.write_all(indent.as_bytes());
+        }
+        if let Some(text) = &self.text {
             output.write_all(text.as_bytes());
         } else {
             // TODO: Escaping
             output.write_all(&self.parts.join(".").as_bytes());
         }
-        output.write_all(self.posttext.as_bytes());
+        if let Some(posttext) = &self.posttext {
+            output.write_all(posttext.as_bytes());
+        }
     }
 }
 
-impl<'a> DocValue<'a> {
-    fn as_table_mut(&mut self) -> Option<&'a mut DocTable> {
+impl DocValue {
+
+    fn as_table_mut(&mut self) -> Option<&mut DocTable> {
         match self.parsed {
             DocValueType::Table(ref mut t) => Some(t),
             _ => None,
@@ -586,35 +594,51 @@ impl<'a> DocValue<'a> {
     //     }
     // }
 
-    fn new(value: DocValueType<'a>) -> DocValue<'a> {
+    fn new(value: DocValueType) -> DocValue {
         DocValue {
-            pretext: "",
-            text: "",
-            posttext: "",
+            pretext: None,
+            text: None,
+            posttext: None,
             parsed: value,
         }
     }
 
-    fn from_raw(raw: RawValue<'a>) -> Result<DocValue<'a>, de::Error> {
+    fn from_raw(raw: RawValue) -> Result<DocValue, de::Error> {
         Ok(DocValue {
-            pretext: raw.pretext,
-            text: raw.text,
-            posttext: raw.posttext,
+            pretext: opt_str(raw.pretext),
+            text: opt_str(raw.text),
+            posttext: opt_str(raw.posttext),
             parsed: DocValueType::from_raw(raw.parsed)?,
         })
+    }
+
+    pub fn from_str(s: &str) -> Result<DocValue, de::Error> {
+        let mut d = Deserializer::new(s);
+        let value = d.value()?;
+        DocValue::from_raw(value)
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut res: Box<Vec<u8>> = Box::new(Vec::new());
+        self.render(&mut res);
+        unsafe { String::from_utf8_unchecked(*res) }
     }
 
     fn render(&self, mut output: &mut dyn Write) {
         // if self.parsed.is_intermediate() {
         //     self.parsed.render(output)
         // }
-        output.write_all(self.pretext.as_bytes());
-        if self.text.is_empty() {
-            self.parsed.render(output);
-        } else {
-            output.write_all(self.text.as_bytes());
+        if let Some(pretext) = &self.pretext {
+            output.write_all(pretext.as_bytes());
         }
-        output.write_all(self.posttext.as_bytes());
+        if let Some(text) = &self.text {
+            output.write_all(text.as_bytes());
+        } else {
+            self.parsed.render(output);
+        }
+        if let Some(posttext) = &self.posttext {
+            output.write_all(posttext.as_bytes());
+        }
     }
 
     pub fn is_integer(&self) -> bool {
@@ -661,6 +685,9 @@ impl<'a> DocValue<'a> {
     pub fn is_array_table(&self) -> bool {
         match &self.parsed {
             DocValueType::Table(t) => t.is_array,
+            DocValueType::Array(a) => {
+                a.last().map_or(false, |dv| dv.is_array_table())
+            }
             _ => false,
         }
     }
@@ -707,34 +734,42 @@ impl<'a> DocValue<'a> {
         }
     }
 
-    // pub fn get<I: DocIndex>(&'a self, index: I) -> Option<&'a DocValue<'a>> {
-    //     index.index(self)
-    // }
-    // pub fn get<I: DocIndex>(&self, index: I) -> Option<&DocValue<'a>> {
-    //     index.index(self)
-    // }
-    // pub fn get(&self, index: &str) -> Option<&DocValue<'a>> {
-    //     match &self.parsed {
-    //         DocValueType::Table(t) => t.get(&index),
-    //         _ => None,
-    //     }
-    // }
-    // fn get(&self, key: &str) -> Option<&DocValue<'a>> {
-    //     self.map.get(key)
-    // }
-
-    fn get<I: DocIndex>(&'a self, index: I) -> Option<&'a DocValue<'a>> {
+    pub fn get<I: DocIndex>(&self, index: I) -> Option<&DocValue> {
         index.index(self)
+    }
+
+    pub fn is_empty(&self) -> Option<bool> {
+        match &self.parsed {
+            DocValueType::Array(a) => Some(a.is_empty()),
+            DocValueType::Table(t) => Some(t.map.is_empty()),
+            _ => None,
+        }
+    }
+
+    pub fn len(&self) -> Option<usize> {
+        match &self.parsed {
+            DocValueType::Array(a) => Some(a.len()),
+            DocValueType::Table(t) => Some(t.map.len()),
+            _ => None,
+        }
     }
 }
 
-impl<'a> DocValueType<'a> {
-    fn from_raw(raw: RawValueType<'a>) -> Result<DocValueType<'a>, de::Error> {
+impl FromStr for DocValue {
+    type Err = de::Error;
+    fn from_str(s: &str) -> Result<DocValue, Self::Err> {
+        DocValue::from_str(s)
+    }
+}
+
+
+impl DocValueType {
+    fn from_raw(raw: RawValueType) -> Result<DocValueType, de::Error> {
         let dt = match raw {
             RawValueType::Integer(i) => DocValueType::Integer(i),
             RawValueType::Float(f) => DocValueType::Float(f),
             RawValueType::Boolean(b) => DocValueType::Boolean(b),
-            RawValueType::String(s) => DocValueType::String(s),
+            RawValueType::String(s) => DocValueType::String(s.to_string()),
             RawValueType::Datetime(dt) => match dt.parse() {
                 Ok(dt_value) => DocValueType::Datetime(dt_value),
                 Err(e) => return Err(de::Error::custom(e.to_string())),
@@ -813,6 +848,14 @@ impl<'a> DocValueType<'a> {
 fn is_blank(s: &str) -> bool {
     s.chars()
         .all(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+}
+
+fn opt_str(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(String::from(s))
+    }
 }
 
 #[cfg(test)]

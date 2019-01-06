@@ -3,7 +3,7 @@ use std::ops;
 
 pub trait DocIndex: Sealed {
     #[doc(hidden)]
-    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>>;
+    fn index<'a>(&self, val: &'a DocValue) -> Option<&'a DocValue>;
 }
 
 #[doc(hidden)]
@@ -15,73 +15,23 @@ impl<'a, T: Sealed + ?Sized> Sealed for &'a T {}
 
 // TODO: I cannot get the lifetimes to work for ops::Index to use DocIndex.
 // Temporary workaround is to implement the 3 types manually below.
-// impl<'a, I> ops::Index<I> for DocValue<'a>
-//     where I: DocIndex
-// {
-//     type Output = DocValue<'a>;
+impl<I> ops::Index<I> for DocValue
+    where I: DocIndex
+{
+    type Output = DocValue;
 
-//     fn index(&self, index: I) -> &DocValue<'a> {
-//         index.index(self).unwrap()
-//         // self.get(index).expect("index not found")
-//     }
-// }
-
-impl<'a> ops::Index<&str> for DocValue<'a> {
-    type Output = DocValue<'a>;
-
-    fn index(&self, index: &str) -> &DocValue<'a> {
-        match &self.parsed {
-            DocValueType::Table(t) => t.get(index).unwrap(),
-            _ => panic!("wrong type"),
-        }
+    fn index(&self, index: I) -> &DocValue {
+        index.index(self).unwrap()
     }
 }
 
-impl<'a> ops::Index<String> for DocValue<'a> {
-    type Output = DocValue<'a>;
+impl ops::Index<&str> for TomlDocument {
+    type Output = DocValue;
 
-    fn index(&self, index: String) -> &DocValue<'a> {
-        match &self.parsed {
-            DocValueType::Table(t) => t.get(&index).unwrap(),
-            _ => panic!("wrong type"),
-        }
-    }
-}
-
-impl<'a> ops::Index<usize> for DocValue<'a> {
-    type Output = DocValue<'a>;
-
-    fn index(&self, index: usize) -> &DocValue<'a> {
-        match &self.parsed {
-            DocValueType::Array(a) => a.get(index).unwrap(),
-            _ => panic!("wrong type"),
-        }
-    }
-}
-
-impl<'a> ops::Index<&str> for TomlDocument<'a> {
-    type Output = DocValue<'a>;
-
-    fn index(&self, index: &str) -> &DocValue<'a> {
+    fn index(&self, index: &str) -> &DocValue {
         self.get(index).expect("index not found")
     }
 }
-
-// match &self.parsed {
-//     DocValueType::Table(t) => t.get(&index).unwrap(),
-//     _ => panic!("wrong type"),
-// }
-
-// match &self.parsed {
-//     DocValueType::Table(t) => t.map.get::<str>(&index).unwrap(),
-//     _ => panic!("wrong type"),
-// }
-
-// self.get(index).expect("index not found")
-// self.get(&index).expect("index not found")
-// unimplemented!()
-//     }
-// }
 
 // impl DocIndex for usize {
 //     fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
@@ -100,7 +50,7 @@ impl<'a> ops::Index<&str> for TomlDocument<'a> {
 // }
 
 impl DocIndex for str {
-    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+    fn index<'a>(&self, val: &'a DocValue) -> Option<&'a DocValue> {
         match &val.parsed {
             DocValueType::Table(t) => t.get(self),
             _ => None,
@@ -116,7 +66,7 @@ impl DocIndex for str {
 }
 
 impl DocIndex for String {
-    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+    fn index<'a>(&self, val: &'a DocValue) -> Option<&'a DocValue> {
         self[..].index(val)
     }
 
@@ -129,7 +79,7 @@ impl<'s, T: ?Sized> DocIndex for &'s T
 where
     T: DocIndex,
 {
-    fn index<'a>(&self, val: &'a DocValue<'a>) -> Option<&'a DocValue<'a>> {
+    fn index<'a>(&self, val: &'a DocValue) -> Option<&'a DocValue> {
         (**self).index(val)
     }
 
