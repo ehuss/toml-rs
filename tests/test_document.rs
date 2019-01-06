@@ -29,3 +29,27 @@ fn test_docvalue_parse() {
     assert_eq!(dv["a"].as_str(), Some("foo"));
     assert_eq!(dv.to_string(), txt);
 }
+
+#[test]
+fn remove_keys() {
+    let mut doc = TomlDocument::from_str("\
+        a.b.c = 1\n\
+        a.d = 2\n\
+    ").unwrap();
+    let dv = doc["a"].remove("b").unwrap();
+    println!("{:?}", dv.to_string());
+    // assert_eq!(dv.to_string(), );
+    assert_eq!(doc.to_string(), "a.d = 2\n");
+}
+
+#[test]
+fn iter() {
+    let doc = TomlDocument::from_str("\
+        a.b.c = 1\n\
+        a.b.d = 2\n\
+    ").unwrap();
+    let keys: Vec<&String> = doc.iter().map(|x| x.0).collect();
+    assert_eq!(&keys, &[&String::from("a")]);
+    let keys: Vec<&String> = doc["a"]["b"].table_iter().map(|x| x.0).collect();
+    assert_eq!(&keys, &[&String::from("c"), &String::from("d")]);
+}

@@ -13,6 +13,7 @@ use std::{
 };
 
 mod index;
+mod iter;
 pub use self::index::DocIndex;
 
 #[derive(Debug)]
@@ -104,6 +105,8 @@ pub struct DocTable {
     table_posttext: Option<String>,
     indentation: Option<String>,
     /// Sequence of key/values in the table in the order they appear.
+    ///
+    /// These entries may become stale, so care must be taken when inspecting them.
     items: Vec<(DocKey, PathIndex)>,
     /// Map of values in this table.
     map: HashMap<String, DocValue>,
@@ -214,6 +217,17 @@ impl TomlDocument {
         self.root.get(key)
     }
 
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut DocValue> {
+        self.root.get_mut(key)
+    }
+
+    pub fn iter(&self) -> iter::IterTable {
+        self.root.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> iter::IterTableMut {
+        self.root.iter_mut()
+    }
 
 }
 
@@ -452,38 +466,54 @@ impl DocTable {
     }
 
     fn render(&self, mut output: &mut dyn Write) {
-        if let Some(pretext) = &self.header_pretext {
-            output.write_all(pretext.as_bytes());
-        }
-        if let Some(key) = &self.header_key {
-            assert!(!self.is_intermediate);
-            // TODO: Do this more cleanly.
-            // Maybe root table could be part of an enum table type?
-            if !key.parts.is_empty() {
-                if self.is_array {
-                    output.write_all(b"[[");
-                } else {
-                    output.write_all(b"[");
-                }
-                key.render(output);
-                if self.is_array {
-                    output.write_all(b"]]");
-                } else {
-                    output.write_all(b"]");
+        // TODO: think hard about this is_intermediate
+        // Could be useful if someone yanks out an intermediate table.
+        if self.is_inline || self.is_intermediate {
+            output.write_all(b"{");
+            for (doc_key, pi) in &self.items {
+                if let Some(dv) = self.get_path(pi, 0) {
+                    output.write_all(b" ");
+                    // TODO: whitespace/comments here need to be fixed.
+                    doc_key.render(output);
+                    output.write_all(b" = ");
+                    dv.render(output);
                 }
             }
-        }
-        if let Some(posttext) = &self.header_posttext {
-            output.write_all(posttext.as_bytes());
-        }
-        for (doc_key, pi) in &self.items {
-            let dv = self.get_path(pi, 0).expect("missing item path");
-            doc_key.render(output);
-            output.write_all(b"=");
-            dv.render(output);
-        }
-        if let Some(text) = &self.table_posttext {
-            output.write_all(text.as_bytes());
+            output.write_all(b"}");
+        } else {
+            if let Some(pretext) = &self.header_pretext {
+                output.write_all(pretext.as_bytes());
+            }
+            if let Some(key) = &self.header_key {
+                // TODO: Do this more cleanly.
+                // Maybe root table could be part of an enum table type?
+                if !key.parts.is_empty() {
+                    if self.is_array {
+                        output.write_all(b"[[");
+                    } else {
+                        output.write_all(b"[");
+                    }
+                    key.render(output);
+                    if self.is_array {
+                        output.write_all(b"]]");
+                    } else {
+                        output.write_all(b"]");
+                    }
+                }
+            }
+            if let Some(posttext) = &self.header_posttext {
+                output.write_all(posttext.as_bytes());
+            }
+            for (doc_key, pi) in &self.items {
+                if let Some(dv) = self.get_path(pi, 0) {
+                    doc_key.render(output);
+                    output.write_all(b"=");
+                    dv.render(output);
+                }
+            }
+            if let Some(text) = &self.table_posttext {
+                output.write_all(text.as_bytes());
+            }
         }
     }
 
@@ -519,6 +549,7 @@ impl DocTable {
                             }
                         }
                     } else {
+                        // TODO: Handle this if the array was removed and replaced.
                         panic!("get_path expected array, got {:?}", dv);
                     }
                 } else {
@@ -531,6 +562,44 @@ impl DocTable {
     pub fn get(&self, key: &str) -> Option<&DocValue> {
         self.map.get(key)
     }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut DocValue> {
+        self.map.get_mut(key)
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<DocValue> {
+        if let Some(dv) = self.map.remove(key) {
+            // When detaching intermediate tables, convert them to something
+            // useful that could potentially be re-used.
+            Some(dv)
+        } else {
+            None
+        }
+    }
+
+    pub fn iter(&self) -> iter::IterTable {
+        iter::IterTable {
+            items: self.map.iter()
+        }
+    }
+
+    pub fn iter_mut(&mut self) -> iter::IterTableMut {
+        iter::IterTableMut {
+            items: self.map.iter_mut()
+        }
+    }
+
+    pub fn into_iter(self) -> iter::IntoIterTable {
+        iter::IntoIterTable {
+            items: self.map.into_iter()
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.map.clear();
+    }
+
 }
 
 impl DocKey {
@@ -735,22 +804,112 @@ impl DocValue {
     }
 
     pub fn get<I: DocIndex>(&self, index: I) -> Option<&DocValue> {
-        index.index(self)
+        index.index_get(self)
     }
 
-    pub fn is_empty(&self) -> Option<bool> {
-        match &self.parsed {
-            DocValueType::Array(a) => Some(a.is_empty()),
-            DocValueType::Table(t) => Some(t.map.is_empty()),
-            _ => None,
+    pub fn get_mut<I: DocIndex>(&mut self, index: I) -> Option<&mut DocValue> {
+        index.index_get_mut(self)
+    }
+
+    pub fn remove<I: DocIndex>(&mut self, index: I) -> Option<DocValue> {
+        index.index_remove(self)
+    }
+
+    pub fn clear(&mut self) {
+        match &mut self.parsed {
+            DocValueType::Array(a) => a.clear(),
+            DocValueType::Table(t) => t.clear(),
+            t @ _ => panic!("clear on {} type", t.type_str()),
         }
     }
 
-    pub fn len(&self) -> Option<usize> {
+    pub fn is_empty(&self) -> bool {
         match &self.parsed {
-            DocValueType::Array(a) => Some(a.len()),
-            DocValueType::Table(t) => Some(t.map.len()),
-            _ => None,
+            DocValueType::Array(a) => a.is_empty(),
+            DocValueType::Table(t) => t.map.is_empty(),
+            t @ _ => panic!("is_empty on {} type", t.type_str()),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.parsed {
+            DocValueType::Array(a) => a.len(),
+            DocValueType::Table(t) => t.map.len(),
+            t @ _ => panic!("len on {} type", t.type_str()),
+        }
+    }
+
+    pub fn iter_table(&self) -> iter::IterTable {
+        match &self.parsed {
+            DocValueType::Table(t) => t.iter(),
+            t @ _ => panic!("iter_table on {} type", t.type_str()),
+        }
+    }
+
+    pub fn iter_table_mut(&mut self) -> iter::IterTableMut {
+        match &mut self.parsed {
+            DocValueType::Table(t) => t.iter_mut(),
+            t @ _ => panic!("iter_table_mut on {} type", t.type_str()),
+        }
+    }
+
+    pub fn into_iter_table(self) -> iter::IntoIterTable {
+        match self.parsed {
+            DocValueType::Table(t) => t.into_iter(),
+            t @ _ => panic!("into_iter_table on {} type", t.type_str()),
+        }
+    }
+
+    pub fn iter_array(&self) -> iter::IterArray {
+        match &self.parsed {
+            DocValueType::Array(a) => {
+                iter::IterArray {
+                    items: a.iter()
+                }
+            },
+            t @ _ => panic!("iter_array on {} type", t.type_str()),
+        }
+    }
+
+    pub fn iter_array_mut(&mut self) -> iter::IterArrayMut {
+        match &mut self.parsed {
+            DocValueType::Array(a) => {
+                iter::IterArrayMut {
+                    items: a.iter_mut()
+                }
+            },
+            t @ _ => panic!("iter_array_mut on {} type", t.type_str()),
+        }
+    }
+
+    pub fn into_iter_array(self) -> iter::IntoIterArray {
+        match self.parsed {
+            DocValueType::Array(a) => {
+                iter::IntoIterArray {
+                    items: a.into_iter()
+                }
+            },
+            t @ _ => panic!("into_iter_array on {} type", t.type_str()),
+        }
+    }
+
+    pub fn push(&mut self, mut value: DocValue) {
+        if self.is_array_table() {
+            match &mut value.parsed {
+                DocValueType::Table(t) => {
+                    t.is_array = true;
+                    t.is_inline = false;
+                    // TODO: Need to decide how to handle Array of Tables.
+                    // t.header_key = self.last().
+                }
+                _ => panic!("cannot push non-table to array of tables"),
+            }
+        }
+        match &mut self.parsed {
+            DocValueType::Array(a) => {
+                a.push(value)
+            },
+            t @ _ => panic!("push on {} type", t.type_str()),
         }
     }
 }
@@ -836,11 +995,31 @@ impl DocValueType {
         }
     }
 
+    fn as_table(&self) -> &DocTable {
+        match self {
+            DocValueType::Table(t) => t,
+            t @ _ => panic!("as_table on {} type", t.type_str()),
+        }
+    }
+
     fn is_intermediate_table(&self) -> bool {
         if let DocValueType::Table(t) = self {
             t.is_intermediate
         } else {
             false
+        }
+    }
+
+    /// Returns a human-readable representation of the type of this value.
+    pub fn type_str(&self) -> &'static str {
+        match *self {
+            DocValueType::String(..) => "string",
+            DocValueType::Integer(..) => "integer",
+            DocValueType::Float(..) => "float",
+            DocValueType::Boolean(..) => "boolean",
+            DocValueType::Datetime(..) => "datetime",
+            DocValueType::Array(..) => "array",
+            DocValueType::Table(..) => "table",
         }
     }
 }
