@@ -1,4 +1,4 @@
-use super::{DocKey, DocValue, DocValueType, TomlDocument, TablePath, DocTable};
+use super::{DocKey, DocTable, DocValue, DocValueType, TablePath, TomlDocument};
 use std::ops;
 
 pub trait DocIndex: Sealed {
@@ -26,7 +26,8 @@ impl<'v, T: Sealed + ?Sized> Sealed for &'v T {}
 // TODO: I cannot get the lifetimes to work for ops::Index to use DocIndex.
 // Temporary workaround is to implement the 3 types manually below.
 impl<I> ops::Index<I> for DocValue
-    where I: DocIndex
+where
+    I: DocIndex,
 {
     type Output = DocValue;
 
@@ -56,25 +57,23 @@ where
     }
 }
 
-impl ops::IndexMut<&str> for TomlDocument
-{
+impl ops::IndexMut<&str> for TomlDocument {
     fn index_mut(&mut self, index: &str) -> &mut DocValue {
         index.index_get_doc_mut(self).expect("index not found")
     }
 }
 
-
 impl DocIndex for usize {
     fn index_get<'v>(&self, val: &'v DocValue) -> Option<&'v DocValue> {
         match &val.parsed {
-            DocValueType::Array{values, ..} => values.get(*self),
+            DocValueType::Array { values, .. } => values.get(*self),
             _ => None,
         }
     }
 
     fn index_get_mut<'v>(&self, val: &'v mut DocValue) -> Option<&'v mut DocValue> {
         match &mut val.parsed {
-            DocValueType::Array{values, ..} => values.get_mut(*self),
+            DocValueType::Array { values, .. } => values.get_mut(*self),
             _ => None,
         }
     }
@@ -86,10 +85,9 @@ impl DocIndex for usize {
         panic!("usize index into TomlDocument not allowed");
     }
 
-
     fn index_or_insert_value<'v>(&self, val: &'v mut DocValue) -> &'v mut DocValue {
         match &mut val.parsed {
-            DocValueType::Array{values, ..} => {
+            DocValueType::Array { values, .. } => {
                 let len = values.len();
                 values.get_mut(*self).unwrap_or_else(|| {
                     panic!(
@@ -98,7 +96,10 @@ impl DocIndex for usize {
                     )
                 })
             }
-            t @ _ => panic!("usize index only supported for array type, not {}", t.type_str()),
+            t @ _ => panic!(
+                "usize index only supported for array type, not {}",
+                t.type_str()
+            ),
         }
     }
 
@@ -108,7 +109,7 @@ impl DocIndex for usize {
 
     fn index_remove<'v>(&self, val: &'v mut DocValue) -> Option<DocValue> {
         match &mut val.parsed {
-            DocValueType::Array{values, ..} => Some(values.remove(*self)),
+            DocValueType::Array { values, .. } => Some(values.remove(*self)),
             _ => None,
         }
     }
@@ -150,7 +151,10 @@ impl DocIndex for str {
                 unimplemented!();
                 // table.entry(self).or_insert(DocValue::new(DocValueType::Reserved))
             }
-            t @ _ => panic!("string index only supported for table type, not {}", t.type_str()),
+            t @ _ => panic!(
+                "string index only supported for table type, not {}",
+                t.type_str()
+            ),
         }
     }
 

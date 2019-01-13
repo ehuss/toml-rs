@@ -1,9 +1,5 @@
-use super::{DocValue};
-use std::{
-    collections::hash_map,
-    slice,
-    vec,
-};
+use super::DocValue;
+use std::{collections::hash_map, slice, vec};
 
 pub struct IterTable<'a> {
     pub(crate) items: hash_map::Iter<'a, String, DocValue>,

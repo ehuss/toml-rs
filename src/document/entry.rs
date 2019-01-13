@@ -1,6 +1,6 @@
-use std::collections::hash_map;
-use super::{DocKey, DocTable, DocValue, TablePath, DocValueType};
 use self::DocEntry::*;
+use super::{DocKey, DocTable, DocValue, DocValueType, TablePath};
+use std::collections::hash_map;
 
 pub enum DocEntry<'a> {
     Vacant(VacantDocEntry<'a>),
@@ -52,7 +52,7 @@ impl<'a> DocEntry<'a> {
             Occupied(mut entry) => {
                 f(entry.get_mut());
                 Occupied(entry)
-            },
+            }
         }
     }
 }
@@ -134,6 +134,4 @@ impl<'a> OccupiedDocEntry<'a> {
     pub fn replace_key(self) -> DocKey {
         unimplemented!();
     }
-
-
 }
