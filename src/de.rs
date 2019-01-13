@@ -1567,7 +1567,7 @@ impl<'a> Deserializer<'a> {
             .map_err(|e| self.token_error(e))
     }
 
-    fn dotted_key(&mut self, indent: Option<&'a str>) -> Result<RawKey<'a>, Error> {
+    pub(crate) fn dotted_key(&mut self, indent: Option<&'a str>) -> Result<RawKey<'a>, Error> {
         let mut parts = Vec::new();
         let pretext = if let Some(indent) = indent {
             indent

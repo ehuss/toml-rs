@@ -1,6 +1,6 @@
 extern crate toml;
 
-use toml::document::{TomlDocument, DocValue};
+use toml::document::{TomlDocument, DocValue, DocKey};
 
 const FRUITS: &str = "\
 # This is a document comment.
@@ -50,11 +50,12 @@ fn test_docvalue_parse() {
     let txt = " 123  #comment";
     let dv = DocValue::from_str(txt).unwrap();
     assert_eq!(dv.as_integer(), Some(123));
-    assert_eq!(dv.to_string(), txt);
-    let txt = "{a = 'foo'}";
+    assert_eq!(dv.to_string(), txt.trim_left());
+    let txt = "{a = 'foo'} # comment";
     let dv: DocValue = txt.parse().unwrap();
     assert_eq!(dv["a"].as_str(), Some("foo"));
     assert_eq!(dv.to_string(), txt);
+    // TODO: Handle comments/newlines at end, when value is added to an inline table.
 }
 
 #[test]
@@ -110,4 +111,53 @@ root_key = 1
 [a.other]
 key = 3
 ");
+}
+
+#[test]
+fn test_insert_value() {
+    let mut doc = TomlDocument::new();
+    doc.insert("a".parse().unwrap(), "1".parse().unwrap()).unwrap();
+    assert_eq!(doc.to_string(), "a = 1\n");
+    doc.insert("  b  ".parse().unwrap(), "  2  # Comment\n".parse().unwrap()).unwrap();
+    assert_eq!(doc.to_string(), "a = 1\nb = 2  # Comment\n");
+
+    let mut doc = TomlDocument::new();
+    doc.insert("a.b.c".parse().unwrap(), "true".parse().unwrap()).unwrap();
+    assert_eq!(doc.to_string(), "a.b.c = true\n");
+}
+
+#[test]
+fn test_entry() {
+    let mut doc = TomlDocument::new();
+    doc.entry("foo").or_insert_with(|| DocValue::new_standard_table("foo".parse().unwrap()));
+    assert_eq!(doc.to_string(), "[foo]\n");
+
+    doc.entry(DocKey::from_str("a.b.c").unwrap())
+        .or_insert_with(|| DocValue::new_standard_table("a.b.c".parse().unwrap()));
+    assert_eq!(doc.to_string(), "[a.b.c]\n[foo]\n");
+
+    doc.entry(DocKey::from_str("x.y.z").unwrap())
+        .or_insert_with(|| DocValue::new_inline_table());
+    assert_eq!(doc.to_string(), "x.y.z = {}\n[a.b.c]\n[foo]\n");
+    // doc.entry("foo");
+    // doc.entry(String::from("foo"));
+    // use toml::document::DocKey;
+    // doc.entry("foo.bar".parse::<DocKey>().unwrap());
+    // doc.entry(DocKey::from_str("foo.bar").unwrap());
+    // doc.entry(DocKey::from_str("[profile.dev]").unwrap());
+    // doc["[profile.dev]".parse::<DocKey>()]["lto"] = "true".parse().unwrap();
+    // doc["[profile.dev]".parse::<DocKey>()]["lto"] = "true".parse().unwrap();
+
+    // Insert into an existing, empty table.
+    let t = "x = {}";
+    let mut doc = TomlDocument::from_str(t).unwrap();
+    assert_eq!(doc.to_string(), t);
+    doc["x"].entry("y").or_insert_with(|| "1".parse().unwrap());
+    assert_eq!(doc.to_string(), "x = { y = 1 }");
+
+    let t = "x = {foo=1}";
+    let mut doc = TomlDocument::from_str(t).unwrap();
+    assert_eq!(doc.to_string(), t);
+    doc["x"].entry("y").or_insert_with(|| "1".parse().unwrap());
+    assert_eq!(doc.to_string(), "x = { foo=1, y = 1 }");
 }
