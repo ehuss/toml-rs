@@ -1,4 +1,4 @@
-use super::{iter, opt_str, DocEntry, DocIndex, DocKey, DocTable};
+use super::{iter, opt_str, DocArray, DocEntry, DocIndex, DocKey, DocTable};
 use datetime::Datetime;
 use de::{self, Deserializer, RawValue, RawValueType};
 use ser;
@@ -28,7 +28,7 @@ pub enum DocValueType {
     Boolean(bool),
     String(String),
     Datetime(Datetime),
-    Array { aot: bool, values: Vec<DocValue> },
+    Array(DocArray),
     Table(DocTable),
 }
 
@@ -185,7 +185,7 @@ impl DocValue {
 
     fn is_array_of_tables(&self) -> bool {
         match &self.parsed {
-            DocValueType::Array { aot: true, .. } => true,
+            DocValueType::Array(array) if array.is_aot => true,
             _ => false,
         }
     }
@@ -253,7 +253,7 @@ impl DocValue {
 
     pub fn clear(&mut self) {
         match &mut self.parsed {
-            DocValueType::Array { values, .. } => values.clear(),
+            DocValueType::Array(array) => array.clear(),
             DocValueType::Table(t) => t.clear(),
             t @ _ => panic!("clear on {} type", t.type_str()),
         }
@@ -261,7 +261,7 @@ impl DocValue {
 
     pub fn is_empty(&self) -> bool {
         match &self.parsed {
-            DocValueType::Array { values, .. } => values.is_empty(),
+            DocValueType::Array(array) => array.values.is_empty(),
             DocValueType::Table(t) => t.map.is_empty(),
             t @ _ => panic!("is_empty on {} type", t.type_str()),
         }
@@ -269,7 +269,7 @@ impl DocValue {
 
     pub fn len(&self) -> usize {
         match &self.parsed {
-            DocValueType::Array { values, .. } => values.len(),
+            DocValueType::Array(array) => array.values.len(),
             DocValueType::Table(t) => t.len(),
             t @ _ => panic!("len on {} type", t.type_str()),
         }
@@ -277,7 +277,7 @@ impl DocValue {
 
     pub fn is_modified(&self) -> bool {
         match &self.parsed {
-            DocValueType::Array { .. } => false, //TODO
+            DocValueType::Array(array) => array.is_modified,
             DocValueType::Table(t) => t.is_modified,
             _ => false,
         }
@@ -306,8 +306,8 @@ impl DocValue {
 
     pub fn iter_array(&self) -> iter::IterArray {
         match &self.parsed {
-            DocValueType::Array { values, .. } => iter::IterArray {
-                items: values.iter(),
+            DocValueType::Array(array) => iter::IterArray {
+                items: array.values.iter(),
             },
             t @ _ => panic!("iter_array on {} type", t.type_str()),
         }
@@ -315,8 +315,8 @@ impl DocValue {
 
     pub fn iter_array_mut(&mut self) -> iter::IterArrayMut {
         match &mut self.parsed {
-            DocValueType::Array { values, .. } => iter::IterArrayMut {
-                items: values.iter_mut(),
+            DocValueType::Array(array) => iter::IterArrayMut {
+                items: array.values.iter_mut(),
             },
             t @ _ => panic!("iter_array_mut on {} type", t.type_str()),
         }
@@ -324,8 +324,8 @@ impl DocValue {
 
     pub fn into_iter_array(self) -> iter::IntoIterArray {
         match self.parsed {
-            DocValueType::Array { values, .. } => iter::IntoIterArray {
-                items: values.into_iter(),
+            DocValueType::Array(array) => iter::IntoIterArray {
+                items: array.values.into_iter(),
             },
             t @ _ => panic!("into_iter_array on {} type", t.type_str()),
         }
@@ -349,7 +349,7 @@ impl DocValue {
         }
         match &mut self.parsed {
             // TODO: Make sure if aot, that value is standard table.
-            DocValueType::Array { values, .. } => values.push(value),
+            DocValueType::Array(array) => array.push(value),
             t @ _ => panic!("cannot push onto {} type", t.type_str()),
         }
     }
@@ -415,10 +415,8 @@ impl DocValueType {
                     .first()
                     .map(DocValue::is_table_array_member)
                     .unwrap_or(false);
-                DocValueType::Array {
-                    aot: aot,
-                    values: values,
-                }
+                let array = DocArray::new(aot, values);
+                DocValueType::Array(array)
             }
             RawValueType::RawTable(entries) => {
                 let mut table = DocTable::new();
@@ -467,14 +465,7 @@ impl DocValueType {
                 output.write_all(tmp.as_bytes());
             }
             DocValueType::Datetime(d) => drop(write!(output, "{}", d)),
-            DocValueType::Array { values, .. } => {
-                // TODO: check `aot`
-                output.write_all(b"[");
-                for val in values {
-                    val.render(output);
-                }
-                output.write_all(b"]");
-            }
+            DocValueType::Array(array) => array.render(output),
             DocValueType::Table(table) => table.render(output),
         }
     }

@@ -1,5 +1,6 @@
 use super::{
-    entry, iter, DocEntry, DocKey, DocValue, DocValueType, IndexKey, TablePath, TomlDocument,
+    entry, iter, DocArray, DocEntry, DocKey, DocValue, DocValueType, IndexKey, TablePath,
+    TomlDocument,
 };
 use de;
 use std::{
@@ -43,6 +44,7 @@ pub struct DocTable {
 macro_rules! get_path {
     ($self:ident, $path:ident, $path_idx:ident, $get_path:ident, $get:ident, $($m:ident)*) => {
         // TODO: Replace these .0 with with methods.
+        // TODO: Do these [index] operations need to be fallible if the path is old?
         match &$path.0[$path_idx] {
             IndexKey::Table(name) => {
                 if let Some(dv) = $self.map.$get(name) {
@@ -61,8 +63,8 @@ macro_rules! get_path {
             }
             IndexKey::Array(name, arr_index) => {
                 if let Some(dv) = $self.map.$get(name) {
-                    if let DocValueType::Array{values, ..} = & $($m)* dv.parsed {
-                        let indexed = & $($m)* values[*arr_index];
+                    if let DocValueType::Array(array) = & $($m)* dv.parsed {
+                        let indexed = & $($m)* array.values[*arr_index];
                         if $path.0.len() - 1 == $path_idx {
                             Some(indexed)
                         } else {
@@ -219,10 +221,8 @@ impl DocTable {
                     let doc_value = if table.is_array {
                         path.push(IndexKey::Array(part, 0));
                         let values = vec![DocValue::new(DocValueType::Table(table))];
-                        DocValue::new(DocValueType::Array {
-                            aot: true,
-                            values: values,
-                        })
+                        let array = DocArray::new(true, values);
+                        DocValue::new(DocValueType::Array(array))
                     } else {
                         path.push(IndexKey::Table(part));
                         DocValue::new(DocValueType::Table(table))
@@ -280,10 +280,10 @@ impl DocTable {
                             }
                         }
                     }
-                    DocValueType::Array { aot: true, values } => {
-                        let arr_len = values.len();
+                    DocValueType::Array(array) if array.is_aot => {
+                        let arr_len = array.values.len();
                         if is_im {
-                            let mut last = match values.last_mut() {
+                            let mut last = match array.values.last_mut() {
                                 Some(l) => l,
                                 None => {
                                     // TODO: This error could be better. It's more of a type clash.
@@ -320,7 +320,7 @@ impl DocTable {
                             }
                             path.push(IndexKey::Array(part, arr_len));
                             let doc_value = DocValue::new(DocValueType::Table(table));
-                            values.push(doc_value);
+                            array.values.push(doc_value);
                         }
                     }
                     _ => {
@@ -379,10 +379,8 @@ impl DocTable {
                     let doc_value = if value.is_table_array_member() {
                         path.push(IndexKey::Array(part, 0));
                         let values = vec![value];
-                        DocValue::new(DocValueType::Array {
-                            aot: true,
-                            values: values,
-                        })
+                        let array = DocArray::new(true, values);
+                        DocValue::new(DocValueType::Array(array))
                     } else {
                         path.push(IndexKey::Table(part));
                         value
@@ -598,7 +596,7 @@ impl DocTable {
                             .collect();
                     }
                 }
-                DocValueType::Array { values, .. } => {
+                DocValueType::Array(array) => {
                     // TODO
                 }
                 _ => {}
@@ -690,10 +688,8 @@ impl DocTable {
                     let doc_value = if value.is_table_array_member() {
                         // path.push(IndexKey::Array(part, 0));
                         let values = vec![value];
-                        DocValue::new(DocValueType::Array {
-                            aot: true,
-                            values: values,
-                        })
+                        let array = DocArray::new(true, values);
+                        DocValue::new(DocValueType::Array(array))
                     } else {
                         // path.push(IndexKey::Table(part));
                         value
@@ -722,8 +718,8 @@ impl DocTable {
                     }
                     table.collect_new_tables(p_set, new_ps, new_path);
                 }
-                DocValueType::Array { aot: true, values } => {
-                    for (i, value) in values.iter().enumerate() {
+                DocValueType::Array(array) if array.is_aot => {
+                    for (i, value) in array.values.iter().enumerate() {
                         let new_path = path.join(IndexKey::Array(key.clone(), i));
                         if !p_set.contains(&new_path) {
                             new_ps.push(new_path.clone())

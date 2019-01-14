@@ -66,14 +66,14 @@ impl ops::IndexMut<&str> for TomlDocument {
 impl DocIndex for usize {
     fn index_get<'v>(&self, val: &'v DocValue) -> Option<&'v DocValue> {
         match &val.parsed {
-            DocValueType::Array { values, .. } => values.get(*self),
+            DocValueType::Array(array) => array.get(*self),
             _ => None,
         }
     }
 
     fn index_get_mut<'v>(&self, val: &'v mut DocValue) -> Option<&'v mut DocValue> {
         match &mut val.parsed {
-            DocValueType::Array { values, .. } => values.get_mut(*self),
+            DocValueType::Array(array) => array.get_mut(*self),
             _ => None,
         }
     }
@@ -86,21 +86,22 @@ impl DocIndex for usize {
     }
 
     fn index_or_insert_value<'v>(&self, val: &'v mut DocValue) -> &'v mut DocValue {
-        match &mut val.parsed {
-            DocValueType::Array { values, .. } => {
-                let len = values.len();
-                values.get_mut(*self).unwrap_or_else(|| {
-                    panic!(
-                        "index {} out of bounds for array length length {}",
-                        self, len
-                    )
-                })
-            }
-            t @ _ => panic!(
-                "usize index only supported for array type, not {}",
-                t.type_str()
-            ),
-        }
+        unimplemented!()
+        // match &mut val.parsed {
+        //     DocValueType::Array { values, .. } => {
+        //         let len = values.len();
+        //         values.get_mut(*self).unwrap_or_else(|| {
+        //             panic!(
+        //                 "index {} out of bounds for array length length {}",
+        //                 self, len
+        //             )
+        //         })
+        //     }
+        //     t @ _ => panic!(
+        //         "usize index only supported for array type, not {}",
+        //         t.type_str()
+        //     ),
+        // }
     }
 
     fn index_or_insert_doc<'v>(&self, doc: &'v mut TomlDocument) -> &'v mut DocValue {
@@ -109,7 +110,7 @@ impl DocIndex for usize {
 
     fn index_remove<'v>(&self, val: &'v mut DocValue) -> Option<DocValue> {
         match &mut val.parsed {
-            DocValueType::Array { values, .. } => Some(values.remove(*self)),
+            DocValueType::Array(array) => Some(array.remove(*self)),
             _ => None,
         }
     }

@@ -5,17 +5,20 @@
 use de::{self, Deserializer, Line};
 use std::{collections::HashSet, fmt};
 
+mod array;
 mod entry;
 mod index;
 mod iter;
 mod key;
 mod table;
 mod value;
-pub use self::entry::DocEntry;
-pub use self::index::DocIndex;
+use self::array::DocArray;
+use self::entry::DocEntry;
+use self::index::DocIndex;
 pub use self::key::DocKey;
-pub use self::table::DocTable;
-pub use self::value::{DocValue, DocValueType};
+use self::table::DocTable;
+pub use self::value::DocValue;
+use self::value::DocValueType;
 
 #[derive(Debug)]
 pub struct TomlDocument {
