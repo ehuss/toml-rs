@@ -7,13 +7,14 @@ use std::{
     collections::{hash_map, HashMap, HashSet},
     io::Write,
 };
+use value::Value;
 
 /// TODO: docme
 /// This serves multiple purposes.
 /// - Bracketed tables `[foo.bar]`.
 /// - Inline tables `inline = {key = "value"}`
 /// - Intermediate tables. Tables created by dotted keys (both bracketed and inline).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DocTable {
     /// Whitespace/comments in front of the header.
     pub(super) header_pretext: Option<String>,
@@ -365,7 +366,6 @@ impl DocTable {
                 if is_im {
                     let mut im_table = DocTable::new();
                     im_table.is_intermediate = true;
-                    im_table.is_inline = !key.is_bracketed;
                     im_table.is_modified = true;
                     let im_value = DocValue::new(DocValueType::Table(im_table));
                     let mut dv = entry.insert(im_value);
@@ -464,7 +464,7 @@ impl DocTable {
         }
     }
 
-    pub(super) fn render(&self, mut output: &mut dyn Write) {
+    pub(super) fn render(&self, mut output: &mut dyn Write, path: Option<&TablePath>) {
         macro_rules! write_eq {
             ($doc_key:ident, $dv:ident) => {
                 match ($doc_key.is_original, $dv.is_original) {
@@ -508,7 +508,9 @@ impl DocTable {
             if let Some(pretext) = &self.header_pretext {
                 output.write_all(pretext.as_bytes());
             }
-            if let Some(key) = &self.header_key {
+            let path_key = path.map(|path| path.to_doc_key());
+            let key = self.header_key.as_ref().or_else(|| path_key.as_ref());
+            if let Some(key) = key {
                 // TODO: Do this more cleanly.
                 // Maybe root table could be part of an enum table type?
                 if !key.parts.is_empty() {
@@ -528,7 +530,18 @@ impl DocTable {
             if let Some(posttext) = &self.header_posttext {
                 output.write_all(posttext.as_bytes());
             }
+            if !self.is_root()
+                && !self
+                    .header_posttext
+                    .as_ref()
+                    .map(|s| s.ends_with("\n"))
+                    .unwrap_or(false)
+            {
+                // TODO: NewlineStyle
+                output.write_all(b"\n");
+            }
             for (doc_key, path) in &self.items {
+                println!("render {:?} {:?}", doc_key, path);
                 if let Some(dv) = self.get_path(path, 0) {
                     doc_key.render(output);
                     write_eq!(doc_key, dv);
@@ -540,6 +553,7 @@ impl DocTable {
                             .map(|s| s.ends_with("\n"))
                             .unwrap_or(false)
                     {
+                        // TODO: NewlineStyle
                         output.write_all(b"\n");
                     }
                 }
@@ -655,6 +669,8 @@ impl DocTable {
                 entry: entry,
                 items: &mut self.items,
                 is_modified: &mut self.is_modified,
+                is_inline: &mut self.is_inline,
+                is_intermediate: &mut self.is_intermediate,
             }),
             hash_map::Entry::Occupied(entry) => unimplemented!(),
         }
@@ -667,15 +683,16 @@ impl DocTable {
         value: DocValue,
         cur_part: usize,
     ) -> &mut DocValue {
+        // println!("entry_insert {:?} {:?}", key, cur_part);
         let is_im = cur_part < key.parts.len() - 1;
         let part = key.parts[cur_part].clone();
         self.is_modified = true;
         match self.map.entry(part) {
+            // TODO: Avoid duplication of code with VacantEntry::insert.
             hash_map::Entry::Vacant(entry) => {
                 if is_im {
                     let mut im_table = DocTable::new();
                     im_table.is_intermediate = true;
-                    im_table.is_inline = !key.is_bracketed;
                     let im_value = DocValue::new(DocValueType::Table(im_table));
                     let mut dv = entry.insert(im_value);
                     // path.push(IndexKey::Table(part));
@@ -685,7 +702,7 @@ impl DocTable {
                     }
                     unreachable!();
                 } else {
-                    let doc_value = if value.is_table_array_member() {
+                    let mut doc_value = if value.is_table_array_member() {
                         // path.push(IndexKey::Array(part, 0));
                         let values = vec![value];
                         let array = DocArray::new(true, values);
@@ -694,6 +711,24 @@ impl DocTable {
                         // path.push(IndexKey::Table(part));
                         value
                     };
+                    // println!("entry_insert leaf vacant {:?}", key);
+                    if let DocValueType::Table(table) = &mut doc_value.parsed {
+                        if self.is_inline {
+                            // println!("self is inline");
+                            if !table.is_inline {
+                                table.is_inline = true;
+                                table.header_key = None;
+                                table.header_posttext = None;
+                                table.header_pretext = None;
+                            }
+                        } else {
+                            // println!("self is standard");
+                            if !table.is_inline {
+                                // println!("other is not inline");
+                                table.header_key = Some(key.clone());
+                            }
+                        }
+                    }
                     return entry.insert(doc_value);
                 }
             }
@@ -711,7 +746,8 @@ impl DocTable {
             match &value.parsed {
                 DocValueType::Table(table) => {
                     let new_path = path.join(IndexKey::Table(key.clone()));
-                    if table.header_key.is_some() {
+                    // if table.header_key.is_some() {
+                    if !table.is_inline && !table.is_intermediate {
                         if !p_set.contains(&new_path) {
                             new_ps.push(new_path.clone())
                         }
@@ -732,5 +768,14 @@ impl DocTable {
                 _ => {}
             }
         }
+    }
+
+    pub fn to_toml_value(self) -> Value {
+        Value::Table(
+            self.map
+                .into_iter()
+                .map(|(key, value)| (key, value.to_toml_value()))
+                .collect(),
+        )
     }
 }

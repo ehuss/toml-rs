@@ -4,6 +4,7 @@
 
 use de::{self, Deserializer, Line};
 use std::{collections::HashSet, fmt};
+use value::Value;
 
 mod array;
 mod entry;
@@ -20,7 +21,7 @@ use self::table::DocTable;
 pub use self::value::DocValue;
 use self::value::DocValueType;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TomlDocument {
     has_bom: bool,
     // line_ending: LineEndingStyle,
@@ -61,6 +62,18 @@ impl TablePath {
             IndexKey::Table(s) => part == s,
             IndexKey::Array(s, _) => part == s,
         }
+    }
+
+    fn to_doc_key(&self) -> DocKey {
+        let parts = self
+            .0
+            .iter()
+            .map(|i| match i {
+                IndexKey::Table(s) => s.clone(),
+                IndexKey::Array(s, _) => s.clone(),
+            })
+            .collect();
+        DocKey::new(parts, None)
     }
 }
 
@@ -187,10 +200,13 @@ impl TomlDocument {
             res.push(b'\xbf');
         }
         let mut writer = Box::new(res);
-        self.root.render(&mut writer);
+        self.root.render(&mut writer, None);
+        println!("new_table_order={:#?}", new_table_order);
         for path in new_table_order {
             if let Some(table) = self.root.get_path(path, 0) {
-                table.render(&mut writer);
+                if let DocValueType::Table(table) = &table.parsed {
+                    table.render(&mut writer, Some(path));
+                }
             }
         }
         // The rendering code always uses utf-8.
@@ -278,6 +294,10 @@ impl TomlDocument {
     {
         self.root.entry(key)
     }
+
+    pub fn to_toml_value(self) -> Value {
+        self.root.to_toml_value()
+    }
 }
 
 impl fmt::Display for TomlDocument {
@@ -339,9 +359,9 @@ mod tests {
         rt("it = {foo = 1}");
         rt("it = {foo=1, bar=true} # Comment");
 
-        rt("[a]");
-        rt(" [ a  ]  # Comment");
-        rt("# Comment\n[a] #Comment");
+        rt("[a]\n");
+        rt(" [ a  ]  # Comment\n");
+        rt("# Comment\n[a] #Comment\n");
         rt("[a]\n\
             k1 = 1");
         rt("[a.b]\n\
@@ -360,6 +380,8 @@ mod tests {
         rt("");
         rt("");
         rt("");
+
+        // TODO: show "[a]" gets converted to "[a]\n" because detecting if it is the last table is a mess.
     }
 
     #[test]

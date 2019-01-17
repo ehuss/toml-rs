@@ -3,8 +3,9 @@ use datetime::Datetime;
 use de::{self, Deserializer, RawValue, RawValueType};
 use ser;
 use std::{io::Write, str::FromStr};
+use value::Value;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DocValue {
     /// This is used to determine if whitespace should be added during rendering.
     /// True if it came from parsing a document.
@@ -20,7 +21,7 @@ pub struct DocValue {
     pub(super) parsed: DocValueType,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DocValueType {
     Reserved,
     Integer(i64),
@@ -68,11 +69,8 @@ impl DocValue {
         DocValue::new(DocValueType::Table(t))
     }
 
-    pub fn new_standard_table(mut header: DocKey) -> DocValue {
-        let mut t = DocTable::new();
-        t.header_posttext = Some("\n".to_string());
-        t.header_key = Some(header);
-        DocValue::new(DocValueType::Table(t))
+    pub fn new_standard_table() -> DocValue {
+        DocValue::new(DocValueType::Table(DocTable::new()))
     }
 
     pub(super) fn from_raw(raw: RawValue) -> Result<DocValue, de::Error> {
@@ -386,6 +384,25 @@ impl DocValue {
     //         t @ _ => panic!("cannot index into {} type", t.type_str())
     //     }
     // }
+
+    pub fn to_toml_value(self) -> Value {
+        match self.parsed {
+            DocValueType::Reserved => unimplemented!(),
+            DocValueType::Integer(i) => Value::Integer(i),
+            DocValueType::Float(f) => Value::Float(f),
+            DocValueType::Boolean(b) => Value::Boolean(b),
+            DocValueType::String(s) => Value::String(s),
+            DocValueType::Datetime(dt) => Value::Datetime(dt),
+            DocValueType::Array(array) => Value::Array(
+                array
+                    .values
+                    .into_iter()
+                    .map(|dv| dv.to_toml_value())
+                    .collect(),
+            ),
+            DocValueType::Table(table) => table.to_toml_value(),
+        }
+    }
 }
 
 impl FromStr for DocValue {
@@ -466,7 +483,7 @@ impl DocValueType {
             }
             DocValueType::Datetime(d) => drop(write!(output, "{}", d)),
             DocValueType::Array(array) => array.render(output),
-            DocValueType::Table(table) => table.render(output),
+            DocValueType::Table(table) => table.render(output, None),
         }
     }
 

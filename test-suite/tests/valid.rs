@@ -106,6 +106,8 @@ fn run(toml_raw: &str, json_raw: &str) {
     let doc = document::TomlDocument::from_str(toml_raw).unwrap();
     let rendered = doc.to_string();
     assert_eq!(toml_raw, rendered);
+    let value = doc.to_toml_value();
+    assert_eq!(value, toml2);
 }
 
 macro_rules! test( ($name:ident, $toml:expr, $json:expr) => (

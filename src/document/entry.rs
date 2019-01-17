@@ -14,6 +14,8 @@ pub struct VacantDocEntry<'a> {
     pub(super) entry: hash_map::VacantEntry<'a, String, DocValue>,
     pub(super) items: &'a mut Vec<(DocKey, TablePath)>,
     pub(super) is_modified: &'a mut bool,
+    pub(super) is_inline: &'a mut bool,
+    pub(super) is_intermediate: &'a mut bool,
 }
 
 pub struct OccupiedDocEntry<'a> {
@@ -66,19 +68,23 @@ impl<'a> VacantDocEntry<'a> {
         self.key
     }
 
-    pub fn insert(self, value: DocValue) -> &'a mut DocValue {
+    pub fn insert(self, mut value: DocValue) -> &'a mut DocValue {
         // TODO: Check if key is array key.
         *self.is_modified = true;
         let is_im = self.cur_part < self.key.parts.len() - 1;
+        // println!("vacant::insert {:?} {:?}", self.key, self.cur_part);
+        // println!("path = {:?}", self.path);
         if is_im {
             let mut im_table = DocTable::new();
             im_table.is_intermediate = true;
-            im_table.is_inline = !self.key.is_bracketed;
+            // im_table.is_inline = !self.key.is_bracketed;
             let im_value = DocValue::new(DocValueType::Table(im_table));
             let mut dv = self.entry.insert(im_value);
             // Get the intermediate table that was just inserted.
+            // println!("IM entry insert");
             if let DocValueType::Table(ref mut t) = dv.parsed {
                 let is_bracketed = value.is_bracketed_table();
+                // println!("is_bracketed={:?}", is_bracketed);
                 let res = t.entry_insert(&self.key, value, self.cur_part + 1);
                 if !is_bracketed {
                     // Standard tables are only listed in
@@ -90,6 +96,28 @@ impl<'a> VacantDocEntry<'a> {
             }
             unreachable!();
         } else {
+            // println!("entry insert vacant");
+            if let DocValueType::Table(table) = &mut value.parsed {
+                // Make sure table types are compatible with what is being
+                // inserted into.
+                if *self.is_inline {
+                    // println!("insert into inline");
+                    if !table.is_inline {
+                        // println!("insert std into inline");
+                        table.is_inline = true;
+                        table.header_key = None;
+                        table.header_posttext = None;
+                        table.header_pretext = None;
+                    }
+                }
+            }
+            if *self.is_intermediate && !*self.is_inline {
+                // inserting into intermediate inline.
+                // Standard tables are OK, others will need to promote.
+                if !value.is_bracketed_table() {
+                    *self.is_intermediate = false;
+                }
+            }
             if !value.is_bracketed_table() {
                 self.items.push((self.key, self.path));
             }

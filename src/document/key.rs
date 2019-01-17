@@ -4,11 +4,6 @@ use std::{fmt, io::Write, str::FromStr};
 
 #[derive(Clone, Debug)]
 pub struct DocKey {
-    /// True if a `[standard]` or `[[array]]` table.
-    /// TODO: This needs some clarification, since keys can sometimes be
-    /// demoted to regular key=value.  Maybe make sure that demotion always
-    /// clears `text` and this? Consider removing this.
-    pub(super) is_bracketed: bool,
     /// This is used to determine if whitespace should be added during rendering.
     /// True if it came from parsing a document.
     /// False if added via the mutation API.
@@ -29,7 +24,6 @@ pub struct DocKey {
 impl DocKey {
     pub(super) fn new(parts: Vec<String>, text: Option<String>) -> DocKey {
         DocKey {
-            is_bracketed: false,
             is_original: false,
             pretext: None,
             indent: None,
@@ -41,7 +35,6 @@ impl DocKey {
 
     pub(super) fn from_raw(pretext: Option<String>, raw: RawKey) -> DocKey {
         DocKey {
-            is_bracketed: raw.text.starts_with("["),
             is_original: true,
             pretext: pretext,
             indent: opt_str(raw.pretext),

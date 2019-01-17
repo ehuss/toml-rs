@@ -1,7 +1,7 @@
 use super::DocValue;
 use std::io::Write;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DocArray {
     pub(super) is_aot: bool,
     pub(super) is_modified: bool,
