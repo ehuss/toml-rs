@@ -240,7 +240,9 @@ impl<'de, 'b> de::Deserializer<'de> for &'b mut Deserializer<'de> {
     where
         V: de::Visitor<'de>,
     {
+        println!("deserialize_enum");
         let value = self.string_or_table()?;
+        println!("value={:?}", value);
         match value.parsed {
             RawValueType::String(val) => visitor.visit_enum(val.into_deserializer()),
             RawValueType::InlineTable(values) | RawValueType::DottedTable(values) => {

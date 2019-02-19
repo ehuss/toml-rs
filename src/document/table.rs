@@ -661,29 +661,26 @@ impl DocTable {
     fn entry_r(&mut self, key: DocKey, cur_part: usize, path: TablePath) -> DocEntry {
         let is_im = cur_part < key.parts.len() - 1;
         let part = key.parts[cur_part].clone();
-        match self.map.entry(part) {
-            hash_map::Entry::Vacant(entry) => DocEntry::Vacant(entry::VacantDocEntry {
+        if self.map.contains_key(&part) {
+            unimplemented!()
+        } else {
+            DocEntry::Vacant(entry::VacantDocEntry {
                 key: key,
                 cur_part: cur_part,
-                path: path,
-                entry: entry,
-                items: &mut self.items,
-                is_modified: &mut self.is_modified,
-                is_inline: &mut self.is_inline,
-                is_intermediate: &mut self.is_intermediate,
-            }),
-            hash_map::Entry::Occupied(entry) => unimplemented!(),
+                table: self,
+            })
         }
     }
 
     /// Called by VacantDocEntry::insert to actually insert a value.
     pub(super) fn entry_insert<'a>(
         &mut self,
-        key: &DocKey,
+        key: DocKey,
         value: DocValue,
         cur_part: usize,
     ) -> &mut DocValue {
-        // println!("entry_insert {:?} {:?}", key, cur_part);
+        // TODO: Check if key is array key.
+        println!("entry_insert {:?} {:?}", key, cur_part);
         let is_im = cur_part < key.parts.len() - 1;
         let part = key.parts[cur_part].clone();
         self.is_modified = true;
@@ -693,12 +690,25 @@ impl DocTable {
                 if is_im {
                     let mut im_table = DocTable::new();
                     im_table.is_intermediate = true;
+                    im_table.is_inline = value.is_inline_table() || !value.is_table();
                     let im_value = DocValue::new(DocValueType::Table(im_table));
                     let mut dv = entry.insert(im_value);
                     // path.push(IndexKey::Table(part));
                     // Get the intermediate table that was just inserted.
+                    println!("insert intermediate cur_part={} key={:?}", cur_part, key);
                     if let DocValueType::Table(ref mut t) = dv.parsed {
-                        return t.entry_insert(key, value, cur_part + 1);
+                        let is_bracketed = value.is_bracketed_table();
+                        if !is_bracketed && cur_part == 0 {
+                            println!("inserting normal value");
+                            // Standard tables are only listed in
+                            // TomlDocument::table_order, and must be recomputed at
+                            // render time.
+                            let path = TablePath::new_from_parts(key.parts.clone());
+                            self.items.push((key.clone(), path));
+                        }
+                        println!("recursing");
+                        let res = t.entry_insert(key, value, cur_part + 1);
+                        return res;
                     }
                     unreachable!();
                 } else {
@@ -729,6 +739,19 @@ impl DocTable {
                             }
                         }
                     }
+                    if self.is_intermediate && !self.is_inline {
+                        // inserting into intermediate inline.
+                        // Standard tables are OK, others will need to promote.
+                        if !doc_value.is_bracketed_table() {
+                            println!("self intermediate standard adding normal value, promote to non-intermediate");
+                            self.is_intermediate = false;
+                        }
+                    }
+                    if !doc_value.is_bracketed_table() && cur_part == 0 {
+                        let path = TablePath::new_from_parts(key.parts.clone());
+                        self.items.push((key, path));
+                    }
+
                     return entry.insert(doc_value);
                 }
             }

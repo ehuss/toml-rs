@@ -10,12 +10,7 @@ pub enum DocEntry<'a> {
 pub struct VacantDocEntry<'a> {
     pub(super) key: DocKey,
     pub(super) cur_part: usize,
-    pub(super) path: TablePath,
-    pub(super) entry: hash_map::VacantEntry<'a, String, DocValue>,
-    pub(super) items: &'a mut Vec<(DocKey, TablePath)>,
-    pub(super) is_modified: &'a mut bool,
-    pub(super) is_inline: &'a mut bool,
-    pub(super) is_intermediate: &'a mut bool,
+    pub(super) table: &'a mut DocTable,
 }
 
 pub struct OccupiedDocEntry<'a> {
@@ -69,6 +64,11 @@ impl<'a> VacantDocEntry<'a> {
     }
 
     pub fn insert(self, mut value: DocValue) -> &'a mut DocValue {
+        self.table.entry_insert(self.key, value, self.cur_part)
+    }
+
+/*
+
         // TODO: Check if key is array key.
         *self.is_modified = true;
         let is_im = self.cur_part < self.key.parts.len() - 1;
@@ -124,6 +124,7 @@ impl<'a> VacantDocEntry<'a> {
             return self.entry.insert(value);
         }
     }
+    */
 }
 
 impl<'a> OccupiedDocEntry<'a> {

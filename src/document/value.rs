@@ -188,7 +188,7 @@ impl DocValue {
         }
     }
 
-    fn is_inline_table(&self) -> bool {
+    pub(super) fn is_inline_table(&self) -> bool {
         match &self.parsed {
             DocValueType::Table(t) => t.is_inline,
             _ => false,

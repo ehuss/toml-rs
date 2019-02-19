@@ -1,4 +1,4 @@
-    #![feature(test)]
+    // #![feature(test)]
 #![allow(deprecated)]  // TEMP
 #![allow(dead_code)]
 //! A [TOML]-parsing library

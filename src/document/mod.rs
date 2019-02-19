@@ -395,15 +395,4 @@ mod tests {
         let rendered = doc.to_string();
         assert_eq!(text, rendered);
     }
-
-    extern crate test;
-
-    #[bench]
-    fn bench_ser(b: &mut test::Bencher) {
-        let text = std::fs::read_to_string("big.toml").unwrap();
-        let doc = TomlDocument::from_str(&text).unwrap();
-        b.iter(|| {
-            doc.to_string();
-        })
-    }
 }

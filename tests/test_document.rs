@@ -179,6 +179,7 @@ fn test_entry_vacant_insert() {
 
     doc.entry(DocKey::from_str("x.y.z").unwrap())
         .or_insert_with(|| DocValue::new_inline_table());
+    println!("{:#?}", doc);
     matches(&doc, "x.y.z = {}\n[a.b.c]\n[foo]\n");
 
     // Insert into an existing, empty table.
