@@ -43,6 +43,7 @@ pub enum Token<'a> {
         val: Cow<'a, str>,
         multiline: bool,
     },
+    Bom,
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -83,15 +84,12 @@ enum MaybeString {
 
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str) -> Tokenizer<'a> {
-        let mut t = Tokenizer {
-            input,
+        Tokenizer {
+            input: input,
             chars: CrlfFold {
                 chars: input.char_indices(),
             },
-        };
-        // Eat utf-8 BOM
-        t.eatc('\u{feff}');
-        t
+        }
     }
 
     pub fn next(&mut self) -> Result<Option<(Span, Token<'a>)>, Error> {
@@ -120,6 +118,7 @@ impl<'a> Tokenizer<'a> {
                     .map(|t| Some((self.step_span(start), t)))
             }
             Some((start, ch)) if is_keylike(ch) => (start, self.keylike(start)),
+            Some((0, '\u{feff}')) => (0, Bom),
 
             Some((start, ch)) => return Err(Error::Unexpected(start, ch)),
             None => return Ok(None),
@@ -178,6 +177,11 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Parse a simple key (one part of a dotted key).
+    ///
+    /// If the key is quoted, the returned string has the quotes removed and
+    /// all escapes are translated. The returned span encompasses the entire
+    /// quoted string including the quotes.
     pub fn table_key(&mut self) -> Result<(Span, Cow<'a, str>), Error> {
         let current = self.current();
         match self.next()? {
@@ -215,11 +219,27 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn eat_whitespace(&mut self) -> Result<(), Error> {
-        while self.eatc(' ') || self.eatc('\t') {
-            // ...
+    pub fn eat_whitespace(&mut self) -> Result<&'a str, Error> {
+        if let Some((start, ch)) = self.peek_one() {
+            if ch == ' ' || ch == '\t' {
+                while self.eatc(' ') || self.eatc('\t') {
+                    // ...
+                }
+                return Ok(&self.input[start..self.current()]);
+            }
         }
-        Ok(())
+        Ok("")
+    }
+
+    pub fn eat_newline(&mut self) -> Result<bool, Error> {
+        if self.eatc('\n') {
+            Ok(true)
+        } else if self.eatc('\r') {
+            self.expect(Token::Newline)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn eat_comment(&mut self) -> Result<bool, Error> {
@@ -227,10 +247,10 @@ impl<'a> Tokenizer<'a> {
             return Ok(false);
         }
         drop(self.comment_token(0));
-        self.eat_newline_or_eof().map(|()| true)
+        self.expect_newline_or_eof().map(|()| true)
     }
 
-    pub fn eat_newline_or_eof(&mut self) -> Result<(), Error> {
+    pub fn expect_newline_or_eof(&mut self) -> Result<(), Error> {
         let current = self.current();
         match self.next()? {
             None | Some((_, Token::Newline)) => Ok(()),
@@ -242,15 +262,9 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn skip_to_newline(&mut self) {
-        loop {
-            match self.one() {
-                Some((_, '\n')) | None => break,
-                _ => {}
-            }
-        }
-    }
-
+    /// Move past the given character if it exists at the current position.
+    ///
+    /// Returns whether or not the character was found.
     fn eatc(&mut self, ch: char) -> bool {
         match self.chars.clone().next() {
             Some((_, ch2)) if ch == ch2 => {
@@ -261,7 +275,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn current(&mut self) -> usize {
+    pub fn current(&self) -> usize {
         self.chars
             .clone()
             .next()
@@ -459,21 +473,22 @@ impl<'a> Tokenizer<'a> {
 
     /// Calculate the span of a single character.
     fn step_span(&mut self, start: usize) -> Span {
-        let end = self
-            .peek_one()
-            .map(|t| t.0)
-            .unwrap_or_else(|| self.input.len());
+        let end = self.current();
         Span { start, end }
     }
 
     /// Peek one char without consuming it.
-    fn peek_one(&mut self) -> Option<(usize, char)> {
+    fn peek_one(&self) -> Option<(usize, char)> {
         self.chars.clone().next()
     }
 
     /// Take one char.
     pub fn one(&mut self) -> Option<(usize, char)> {
         self.chars.next()
+    }
+
+    pub fn is_eof(&self) -> bool {
+        self.peek_one().is_none()
     }
 }
 
@@ -550,6 +565,7 @@ impl<'a> Token<'a> {
             }
             Token::Colon => "a colon",
             Token::Plus => "a plus",
+            Token::Bom => "byte-order mark",
         }
     }
 }

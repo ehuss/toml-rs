@@ -42,10 +42,10 @@ fn bad() {
     bad!(
         "a = 1
          a.b = 2",
-        "dotted key attempted to extend non-table type at line 1 column 5"
+        "dotted key attempted to extend non-table type for key `a` at line 1 column 5"
     );
     bad!(
         "a = {k1 = 1, k1.name = \"joe\"}",
-        "dotted key attempted to extend non-table type at line 1 column 11"
+        "dotted key attempted to extend non-table type for key `a.k1` at line 1 column 11"
     );
 }

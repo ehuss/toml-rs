@@ -315,7 +315,7 @@ fn serde_derive_deserialize_errors() {
         "
             p_a = 'a'
             p_b = [
-                {c_a = '', c_b = 1, c_d = ''},
+                {c_a = '', c_b = 1},
                                # ^
             ]
         ",
